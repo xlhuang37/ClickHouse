@@ -233,11 +233,11 @@ void CustomResourceManager::updateConfiguration(const Poco::Util::AbstractConfig
 }
 
 void CustomResourceManager::updateConfigurationQueryStart(const String & resource_name) {
-
+    (void)resource_name;
 }
 
 void CustomResourceManager::updateConfigurationQueryEnd(const String & resource_name) {
-    
+    (void)resource_name;
 }
 
 bool CustomResourceManager::hasResource(const String & resource_name) const
