@@ -232,6 +232,14 @@ void CustomResourceManager::updateConfiguration(const Poco::Util::AbstractConfig
     // NOTE: after mutex unlock `state` became available for Classifier(s) and must be immutable
 }
 
+void CustomResourceManager::updateConfigurationQueryStart() {
+
+}
+
+void CustomResourceManager::updateConfigurationQueryEnd() {
+    
+}
+
 bool CustomResourceManager::hasResource(const String & resource_name) const
 {
     std::lock_guard lock{mutex};

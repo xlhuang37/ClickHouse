@@ -298,6 +298,16 @@ void WorkloadResourceManager::updateConfiguration(const Poco::Util::AbstractConf
     // No-op
 }
 
+void WorkloadResourceManager::updateConfigurationQueryStart() 
+{
+
+}
+
+void WorkloadResourceManager::updateConfigurationQueryEnd() 
+{
+
+}
+
 void WorkloadResourceManager::createOrUpdateWorkload(const String & workload_name, const ASTPtr & ast)
 {
     std::unique_lock lock{mutex};

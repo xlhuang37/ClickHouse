@@ -57,6 +57,11 @@ public:
     /// Initialize or reconfigure manager.
     virtual void updateConfiguration(const Poco::Util::AbstractConfiguration & config) = 0;
 
+    virtual void updateConfigurationQueryStart();
+    virtual void updateConfigurationQueryEnd();
+
+
+
     /// Returns true iff given resource is controlled through this manager.
     virtual bool hasResource(const String & resource_name) const = 0;
 

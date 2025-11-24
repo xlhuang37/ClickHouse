@@ -122,6 +122,8 @@ public:
     explicit WorkloadResourceManager(IWorkloadEntityStorage & storage_);
     ~WorkloadResourceManager() override;
     void updateConfiguration(const Poco::Util::AbstractConfiguration & config) override;
+    void updateConfigurationQueryStart() override; 
+    void updateConfigurationQueryEnd() override; 
     bool hasResource(const String & resource_name) const override;
     ClassifierPtr acquire(const String & workload_name, const ClassifierSettings & settings) override;
     void forEachNode(VisitorFunc visitor) override;

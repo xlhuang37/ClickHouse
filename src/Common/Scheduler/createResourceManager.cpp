@@ -82,6 +82,15 @@ public:
             manager->updateConfiguration(config);
     }
 
+    void updateConfigurationQueryStart() override
+    {
+
+    }
+
+    void updateConfigurationQueryEnd() override{
+        
+    }
+
     bool hasResource(const String & resource_name) const override
     {
         for (const auto & manager : managers)
