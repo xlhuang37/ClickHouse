@@ -84,11 +84,13 @@ public:
 
     void updateConfigurationQueryStart() override
     {
-
+        for (auto & manager : managers)
+            manager->updateConfigurationQueryStart();
     }
 
     void updateConfigurationQueryEnd() override{
-        
+        for (auto & manager : managers)
+            manager->updateConfigurationQueryEnd();
     }
 
     bool hasResource(const String & resource_name) const override
