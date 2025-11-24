@@ -1365,6 +1365,8 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         pipeline.setConcurrencyControl(state.query_context->getSettingsRef()[Setting::use_concurrency_control]);
         CurrentMetrics::Increment query_thread_metric_increment{CurrentMetrics::QueryThread};
 
+        ResourceManagerPtr manager = state.query_context->getResourceManager();
+        
         try
         {
             Block block;
