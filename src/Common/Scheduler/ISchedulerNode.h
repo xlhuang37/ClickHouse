@@ -46,7 +46,7 @@ inline const Poco::Util::AbstractConfiguration & emptyConfig()
  */
 struct SchedulerNodeInfo
 {
-    double weight = 1.0; /// Weight of this node among it's siblings
+    std::atomic<double> weight = 1.0; /// Weight of this node among it's siblings
     Priority priority; /// Priority of this node among it's siblings (lower value means higher priority)
     Int64 queue_size = std::numeric_limits<Int64>::max(); /// Size of a workload queue
 
