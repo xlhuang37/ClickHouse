@@ -298,12 +298,12 @@ void WorkloadResourceManager::updateConfiguration(const Poco::Util::AbstractConf
     // No-op
 }
 
-void WorkloadResourceManager::updateConfigurationQueryStart() 
+void WorkloadResourceManager::updateConfigurationQueryStart(const String & resource_name) 
 {
 
 }
 
-void WorkloadResourceManager::updateConfigurationQueryEnd() 
+void WorkloadResourceManager::updateConfigurationQueryEnd(const String & resource_name) 
 {
 
 }

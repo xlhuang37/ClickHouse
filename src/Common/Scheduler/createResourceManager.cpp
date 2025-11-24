@@ -82,13 +82,13 @@ public:
             manager->updateConfiguration(config);
     }
 
-    void updateConfigurationQueryStart() override
+    void updateConfigurationQueryStart(const String & resource_name) override
     {
         for (auto & manager : managers)
             manager->updateConfigurationQueryStart();
     }
 
-    void updateConfigurationQueryEnd() override{
+    void updateConfigurationQueryEnd(const String & resource_name) override{
         for (auto & manager : managers)
             manager->updateConfigurationQueryEnd();
     }
