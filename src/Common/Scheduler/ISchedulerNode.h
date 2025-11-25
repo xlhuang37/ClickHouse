@@ -41,14 +41,22 @@ inline const Poco::Util::AbstractConfiguration & emptyConfig()
     return *config;
 }
 
+struct WorkloadRuntimeStats
+{
+    std::atomic<uint32_t> running_queries{0};
+    std::atomic<double>  runtime_factor{1.0};  // multiplier on top of base weight
+ };
+
 /*
  * Info read and write for scheduling purposes by parent
  */
 struct SchedulerNodeInfo
 {
-    std::atomic<double> weight = 1.0; /// Weight of this node among it's siblings
+    double weight = 1.0; /// Weight of this node among it's siblings
     Priority priority; /// Priority of this node among it's siblings (lower value means higher priority)
     Int64 queue_size = std::numeric_limits<Int64>::max(); /// Size of a workload queue
+    std::shared_ptr<WorkloadRuntimeStats> runtime_stats;
+
 
     /// Arbitrary data accessed/stored by parent
     union {
@@ -56,15 +64,19 @@ struct SchedulerNodeInfo
         void * ptr;
     } parent;
 
-    SchedulerNodeInfo() = default;
+    SchedulerNodeInfo()
+        : runtime_stats(std::make_shared<WorkloadRuntimeStats>())
+    {}
 
     explicit SchedulerNodeInfo(double weight_, Priority priority_ = {})
+        : runtime_stats(std::make_shared<WorkloadRuntimeStats>())
     {
         setWeight(weight_);
         setPriority(priority_);
     }
 
-    explicit SchedulerNodeInfo(const Poco::Util::AbstractConfiguration & config, const String & config_prefix = {})
+    explicit SchedulerNodeInfo(const Poco::Util::AbstractConfiguration & config, const String & config_prefix = {}) 
+        : runtime_stats(std::make_shared<WorkloadRuntimeStats>())
     {
         setWeight(config.getDouble(config_prefix + ".weight", weight));
         setPriority(config.getInt64(config_prefix + ".priority", priority));
