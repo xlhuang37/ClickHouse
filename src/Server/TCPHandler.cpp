@@ -1369,13 +1369,14 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         Field field;
         const Settings& settings = state.query_context->getSettingsRef();
         ResourceManagerPtr manager;
+        String workload_name;
         bool willUpdate = false;
         if (settings.tryGet("workload", field))
         {
-            String workload = field.safeGet<String>();
-            if (!workload.empty()) {
+            workload_name = field.safeGet<String>();
+            if (!workload_name.empty()) {
                 manager = state.query_context->getResourceManager();
-                manager->updateConfigurationQueryStart();
+                manager->updateConfigurationQueryStart(workload_name);
                 willUpdate = true;
             }
         } else {
@@ -1433,7 +1434,7 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
 
 
         if(willUpdate) {
-            manager->updateConfigurationQueryEnd();
+            manager->updateConfigurationQueryEnd(workload_name);
         }
         std::lock_guard lock(callback_mutex);
 
