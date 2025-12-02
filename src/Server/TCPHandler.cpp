@@ -1374,7 +1374,7 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         if (settings.tryGet("workload", field))
         {
             workload_name = field.safeGet<String>();
-            if (!workload_name.empty()) {
+            if (!workload_name.empty() && workload_name.compare("default")) {
                 manager = state.query_context->getResourceManager();
                 manager->updateConfigurationQueryStart(workload_name);
                 willUpdate = true;
