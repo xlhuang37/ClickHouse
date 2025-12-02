@@ -84,11 +84,11 @@ struct SchedulerNodeInfo
     }
 
     void updateRuntimeStatQueryStart() {
-        stats->running_queries.fetch_add(1, std::memory_order_relaxed);
+        runtime_stats->running_queries.fetch_add(1, std::memory_order_relaxed);
     }
 
     void updateRuntimeStatQueryEnd() {
-        stats->running_queries.fetch_sub(1, std::memory_order_relaxed);
+        runtime_stats->running_queries.fetch_sub(1, std::memory_order_relaxed);
     }
 
     void setWeight(double value)
