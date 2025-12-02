@@ -1366,14 +1366,16 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         CurrentMetrics::Increment query_thread_metric_increment{CurrentMetrics::QueryThread};
 
         Field field;
+        Settings* settings = state.query_context->getSettingsRef();
+        ResourceManagerPtr manager;
         bool willUpdate = false;
         if (settings.tryGet("workload", field))
         {
             String workload = field.safeGet<String>();
             if (!workload.empty()) {
-                ResourceManagerPtr manager = state.query_context->getResourceManager();
+                manager = state.query_context->getResourceManager();
                 manager->updateConfigurationQueryStart();
-                bool willUpdate = true;
+                willUpdate = true;
             }
                 maybe_workload = workload;
         } else {
