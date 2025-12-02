@@ -59,6 +59,7 @@
 #include <Common/scope_guard_safe.h>
 #include <Common/setThreadName.h>
 #include <Common/thread_local_rng.h>
+#include <Common/Scheduler/IResourceManager.h>
 
 #include <Columns/ColumnSparse.h>
 
@@ -1366,7 +1367,7 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         CurrentMetrics::Increment query_thread_metric_increment{CurrentMetrics::QueryThread};
 
         Field field;
-        Settings* settings = state.query_context->getSettingsRef();
+        const Settings& settings = state.query_context->getSettingsRef();
         ResourceManagerPtr manager;
         bool willUpdate = false;
         if (settings.tryGet("workload", field))
@@ -1377,7 +1378,6 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
                 manager->updateConfigurationQueryStart();
                 willUpdate = true;
             }
-                maybe_workload = workload;
         } else {
             assert(0);
         }
