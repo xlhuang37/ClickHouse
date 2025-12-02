@@ -1365,7 +1365,21 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         pipeline.setConcurrencyControl(state.query_context->getSettingsRef()[Setting::use_concurrency_control]);
         CurrentMetrics::Increment query_thread_metric_increment{CurrentMetrics::QueryThread};
 
-        ResourceManagerPtr manager = state.query_context->getResourceManager();
+        Field field;
+        bool willUpdate = false;
+        if (settings.tryGet("workload", field))
+        {
+            String workload = field.safeGet<String>();
+            if (!workload.empty()) {
+                ResourceManagerPtr manager = state.query_context->getResourceManager();
+                manager->updateConfigurationQueryStart();
+                bool willUpdate = true;
+            }
+                maybe_workload = workload;
+        } else {
+            assert(0);
+        }
+
         
         try
         {
@@ -1416,6 +1430,9 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
           */
 
 
+        if(willUpdate) {
+            manager->updateConfigurationQueryEnd();
+        }
         std::lock_guard lock(callback_mutex);
 
         receivePacketsExpectCancel(state);
