@@ -82,15 +82,15 @@ public:
             manager->updateConfiguration(config);
     }
 
-    void updateConfigurationQueryStart(const String & resource_name) override
+    void updateConfigurationQueryStart(const String & workload_name) override
     {
         for (auto & manager : managers)
-            manager->updateConfigurationQueryStart(resource_name);
+            manager->updateConfigurationQueryStart(workload_name);
     }
 
-    void updateConfigurationQueryEnd(const String & resource_name) override{
+    void updateConfigurationQueryEnd(const String & workload_name) override{
         for (auto & manager : managers)
-            manager->updateConfigurationQueryEnd(resource_name);
+            manager->updateConfigurationQueryEnd(workload_name);
     }
 
     bool hasResource(const String & resource_name) const override

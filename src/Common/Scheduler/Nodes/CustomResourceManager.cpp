@@ -232,12 +232,12 @@ void CustomResourceManager::updateConfiguration(const Poco::Util::AbstractConfig
     // NOTE: after mutex unlock `state` became available for Classifier(s) and must be immutable
 }
 
-void CustomResourceManager::updateConfigurationQueryStart(const String & resource_name) {
-    (void)resource_name;
+void CustomResourceManager::updateConfigurationQueryStart(const String & workload_name) {
+    (void)workload_name;
 }
 
-void CustomResourceManager::updateConfigurationQueryEnd(const String & resource_name) {
-    (void)resource_name;
+void CustomResourceManager::updateConfigurationQueryEnd(const String & workload_name) {
+    (void)workload_name;
 }
 
 bool CustomResourceManager::hasResource(const String & resource_name) const

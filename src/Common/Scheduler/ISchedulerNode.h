@@ -44,7 +44,7 @@ inline const Poco::Util::AbstractConfiguration & emptyConfig()
 struct WorkloadRuntimeStats
 {
     std::atomic<uint32_t> running_queries{0};
-    std::atomic<double>  runtime_factor{1.0};  // multiplier on top of base weight
+    // std::atomic<double>  runtime_factor{1.0};  // multiplier on top of base weight
  };
 
 /*
@@ -81,6 +81,14 @@ struct SchedulerNodeInfo
         setWeight(config.getDouble(config_prefix + ".weight", weight));
         setPriority(config.getInt64(config_prefix + ".priority", priority));
         setQueueSize(config.getInt64(config_prefix + ".queue_size", queue_size));
+    }
+
+    void updateRuntimeStatQueryStart() {
+        stats->running_queries.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void updateRuntimeStatQueryEnd() {
+        stats->running_queries.fetch_sub(1, std::memory_order_relaxed);
     }
 
     void setWeight(double value)
