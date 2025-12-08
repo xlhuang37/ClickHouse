@@ -57,8 +57,8 @@ public:
     /// Initialize or reconfigure manager.
     virtual void updateConfiguration(const Poco::Util::AbstractConfiguration & config) = 0;
 
-    virtual void updateConfigurationQueryStart(const String & resource_name) = 0;
-    virtual void updateConfigurationQueryEnd(const String & resource_name) = 0;
+    virtual void updateConfigurationQueryStart(const String & workload_name) = 0;
+    virtual void updateConfigurationQueryEnd(const String & workload_name) = 0;
 
 
 

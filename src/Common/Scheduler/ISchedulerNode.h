@@ -9,6 +9,7 @@
 #include <base/types.h>
 
 #include <Common/Scheduler/ResourceRequest.h>
+#include <Common/ProfileEvents.h>
 #include <Poco/Util/AbstractConfiguration.h>
 #include <Poco/Util/XMLConfiguration.h>
 
@@ -84,10 +85,12 @@ struct SchedulerNodeInfo
     }
 
     void updateRuntimeStatQueryStart() {
+        ProfileEvents::increment(ProfileEvents::SchedulerNodeUpdate);
         runtime_stats->running_queries.fetch_add(1, std::memory_order_relaxed);
     }
 
     void updateRuntimeStatQueryEnd() {
+        ProfileEvents::increment(ProfileEvents::SchedulerNodeUpdate);
         runtime_stats->running_queries.fetch_sub(1, std::memory_order_relaxed);
     }
 
