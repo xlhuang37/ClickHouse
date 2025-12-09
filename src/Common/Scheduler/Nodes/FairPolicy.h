@@ -41,7 +41,52 @@ class FairPolicy final : public ISchedulerNode
     {
         ISchedulerNode * child = nullptr;
         double vruntime = 0; /// total consumed cost divided by child weight
+        double weight = 1.0;
 
+        /// almost linear
+        std::array<double, 64> speed_almost_linear =
+            [] {
+                std::array<double, 64> s{};
+                for (size_t i = 0; i < s.size(); ++i)
+                {
+                    double cores = static_cast<double>(i + 1);
+                    if (cores <= 32.0)
+                    {
+                        // Near-linear speedup
+                        s[i] = cores - 0.001 * cores;
+                    }
+                    else
+                    {
+                        // Diminishing returns after 32 cores:
+                        // every extra core adds only 0.25 "speed"
+                        double extra = cores - 32.0;
+                        s[i] = 32.0 + std::sqrt(extra);
+                    }
+                }
+                return s;
+            }();
+
+            // flattens after two core
+            std::array<double, 64> speed_two_core_limited =
+                [] {
+                    std::array<double, 64> s{};
+                    for (size_t i = 0; i < s.size(); ++i)
+                    {
+                        double cores = static_cast<double>(i + 1);
+                        if (cores <= 2.0)
+                        {
+                            // Linear: 1 core -> 1x, 2 cores -> 2x
+                            s[i] = cores - 0.001 * cores;
+                        }
+                        else
+                        {
+                            // No additional benefit beyond 2 cores
+                            s[i] = 2.0;
+                        }
+                    }
+                    return s;
+                }();
+    
         /// For min-heap by vruntime
         bool operator<(const Item & rhs) const noexcept
         {

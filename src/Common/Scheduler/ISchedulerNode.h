@@ -62,6 +62,52 @@ struct SchedulerNodeInfo
     Int64 queue_size = std::numeric_limits<Int64>::max(); /// Size of a workload queue
     std::shared_ptr<WorkloadRuntimeStats> runtime_stats;
 
+    /// Speedup vs. core count (index i = cores-1).
+    ///  - Almost linear until 32 cores.
+    ///  - After 32 cores, still increases but with smaller per-core gain.
+    const std::array<double, 64> parallel_speedup =
+        [] {
+            std::array<double, 64> s{};
+            for (size_t i = 0; i < s.size(); ++i)
+            {
+                double cores = static_cast<double>(i + 1);
+                if (cores <= 32.0)
+                {
+                    // Near-linear speedup
+                    s[i] = cores - 0.001 * (cores - 1) * cores;
+                }
+                else
+                {
+                    // Diminishing returns after 32 cores:
+                    // every extra core adds only 0.25 "speed"
+                    s[i] = 32.0 + (cores - 32.0) * 0.25;
+                }
+            }
+            return s;
+        }();
+
+    /// Speedup vs. core count for almost-serial workload:
+    ///  - Almost linear up to 2 cores.
+    ///  - Completely flat after 2 cores.
+    const std::array<double, 64> nonparallel_speedup =
+        [] {
+            std::array<double, 64> s{};
+            for (size_t i = 0; i < s.size(); ++i)
+            {
+                double cores = static_cast<double>(i + 1);
+                if (cores <= 2.0)
+                {
+                    s[i] = cores - 0.001 * (cores - 1) * cores;
+                }
+                else
+                {
+                    s[i] = 2.0;
+                }
+            }
+            return s;
+        }();
+
+    const std::array<double, 64> * active_speedup = nullptr;
 
     /// Arbitrary data accessed/stored by parent
     union {
@@ -133,6 +179,16 @@ struct SchedulerNodeInfo
     {
         // `parent` data is not compared intentionally (it is not part of configuration settings)
         return weight == o.weight && priority == o.priority;
+    }
+
+    void useParallelSpeedupProfile()
+    {
+        active_speedup = &parallel_speedup;
+    }
+
+    void useNonParallelSpeedupProfile()
+    {
+        active_speedup = &nonparallel_speedup;
     }
 };
 

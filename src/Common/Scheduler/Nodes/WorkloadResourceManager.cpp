@@ -96,6 +96,14 @@ void WorkloadResourceManager::Resource::createNode(const NodeInfo & info)
     {
         auto node = std::make_shared<UnifiedSchedulerNode>(scheduler.event_queue, info.settings);
         node->basename = info.name;
+
+        // FIX: hardcoding speedup vector
+        if (info.name.find("One") != std::string::npos) {
+            node->info.useParallelSpeedupProfile();
+        } else {
+            node->info.useNonParallelSpeedupProfile();
+        }
+
         if (!info.parent.empty())
             node_for_workload[info.parent]->attachUnifiedChild(node);
         else
