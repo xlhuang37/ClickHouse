@@ -4,11 +4,17 @@
 
 #include <Common/Stopwatch.h>
 
+#include <Common/ProfileEvents.h>
+
 #include <algorithm>
 #include <optional>
 #include <unordered_map>
 #include <vector>
 
+namespace ProfileEvents
+{
+    extern const Event FairPolicyDequeue;
+}
 
 namespace DB
 {
@@ -150,6 +156,8 @@ public:
 
     std::pair<ResourceRequest *, bool> dequeueRequest() override
     {
+        ProfileEvents::increment(ProfileEvents::FairPolicyDequeue);
+
         // Cycle is required to do deactivations in the case of canceled requests, when dequeueRequest returns `nullptr`
         while (true)
         {
