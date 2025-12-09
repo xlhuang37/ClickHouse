@@ -14,6 +14,7 @@
 namespace ProfileEvents
 {
     extern const Event FairPolicyDequeue;
+    extern const Event RecomputeWeight;
 }
 
 namespace DB
@@ -290,6 +291,8 @@ private:
             Item * item;          // points into items[]
             std::size_t offset;   // how many "cores" we've given this workload so far
         };
+
+        ProfileEvents::increment(ProfileEvents::RecomputeWeight);
 
         std::vector<Candidate> candidates;
         candidates.reserve(heap_size);
