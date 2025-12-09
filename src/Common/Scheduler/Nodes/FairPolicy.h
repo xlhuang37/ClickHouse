@@ -283,7 +283,7 @@ private:
             parent->activateChild(this);
     }
 
-    void FairPolicy::recomputeWeights(std::size_t total_cores)
+    void recomputeWeights(std::size_t total_cores)
     {
         struct Candidate
         {
