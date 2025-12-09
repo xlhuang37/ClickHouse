@@ -23,6 +23,10 @@
 #include <memory>
 #include <mutex>
 
+namespace ProfileEvents
+{
+    extern const Event SchedulerNodeUpdate;
+}
 
 namespace DB
 {
