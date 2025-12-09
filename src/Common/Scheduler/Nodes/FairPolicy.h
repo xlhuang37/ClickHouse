@@ -67,6 +67,90 @@ public:
             removeChild(children.begin()->second.get());
     }
 
+    void recomputeWeights(std::size_t total_cores)
+    {
+        struct Candidate
+        {
+            Item * item;          // points into items[]
+            std::size_t offset;   // how many "cores" we've given this workload so far
+        };
+
+        ProfileEvents::increment(ProfileEvents::RecomputeWeight);
+
+        std::vector<Candidate> candidates;
+        candidates.reserve(heap_size);
+
+        // Build candidate list from active children
+        for (std::size_t i = 0; i < heap_size; ++i)
+        {
+            Item & it = items[i];
+            auto & info = it.child->info;
+
+            if (!info.active_speedup)
+                continue;
+
+            uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+            if (running == 0)
+                continue; // no demand => skip
+
+            candidates.push_back(Candidate{&it, 0});
+            it.weight = 0.0; // we'll recompute from scratch
+        }
+
+        if (candidates.empty())
+            return;
+
+        // Greedily assign cores one by one
+        for (std::size_t core = 0; core < total_cores; ++core)
+        {
+            Candidate * best = nullptr;
+            double best_marginal = -std::numeric_limits<double>::infinity();
+
+            for (auto & c : candidates)
+            {
+                auto & info = c.item->child->info;
+                const auto * speed = info.active_speedup;
+
+                // Current cores allocated to this workload:
+                std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
+
+                // Total speedup at k and k+1 "cores"
+                double s0 = (*speed)[k];
+                double s1 = (*speed)[std::min(k + 1, total_cores - 1)];
+                double marginal = s1 - s0; // Δspeedup for an extra core
+
+                // Normalize by demand (running queries) so we prefer workloads
+                // where this extra core helps more *per query*:
+                uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                if (running == 0)
+                    continue;
+
+                double effective = marginal / static_cast<double>(running);
+
+                if (effective > best_marginal)
+                {
+                    best_marginal = effective;
+                    best = &c;
+                }
+            }
+
+            // No more positive gain
+            if (!best || best_marginal <= 0.0)
+                break;
+
+            // Give this core to the best workload
+            best->offset += 1;
+            best->item->weight += 1.0;  // "number of cores" for this workload
+        }
+
+        // Ensure nobody ends up with zero weight if you rely on weight in a division
+        for (auto & c : candidates)
+        {
+            if (c.item->weight <= 0.0)
+                c.item->weight = 1.0;
+        }
+    }
+
     const String & getTypeName() const override
     {
         static String type_name("fair");
@@ -282,90 +366,6 @@ private:
         // Recursive activation
         if (activate_parent && parent)
             parent->activateChild(this);
-    }
-
-    void recomputeWeights(std::size_t total_cores)
-    {
-        struct Candidate
-        {
-            Item * item;          // points into items[]
-            std::size_t offset;   // how many "cores" we've given this workload so far
-        };
-
-        ProfileEvents::increment(ProfileEvents::RecomputeWeight);
-
-        std::vector<Candidate> candidates;
-        candidates.reserve(heap_size);
-
-        // Build candidate list from active children
-        for (std::size_t i = 0; i < heap_size; ++i)
-        {
-            Item & it = items[i];
-            auto & info = it.child->info;
-
-            if (!info.active_speedup)
-                continue;
-
-            uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-            if (running == 0)
-                continue; // no demand => skip
-
-            candidates.push_back(Candidate{&it, 0});
-            it.weight = 0.0; // we'll recompute from scratch
-        }
-
-        if (candidates.empty())
-            return;
-
-        // Greedily assign cores one by one
-        for (std::size_t core = 0; core < total_cores; ++core)
-        {
-            Candidate * best = nullptr;
-            double best_marginal = -std::numeric_limits<double>::infinity();
-
-            for (auto & c : candidates)
-            {
-                auto & info = c.item->child->info;
-                const auto * speed = info.active_speedup;
-
-                // Current cores allocated to this workload:
-                std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
-
-                // Total speedup at k and k+1 "cores"
-                double s0 = (*speed)[k];
-                double s1 = (*speed)[std::min(k + 1, total_cores - 1)];
-                double marginal = s1 - s0; // Δspeedup for an extra core
-
-                // Normalize by demand (running queries) so we prefer workloads
-                // where this extra core helps more *per query*:
-                uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-                if (running == 0)
-                    continue;
-
-                double effective = marginal / static_cast<double>(running);
-
-                if (effective > best_marginal)
-                {
-                    best_marginal = effective;
-                    best = &c;
-                }
-            }
-
-            // No more positive gain
-            if (!best || best_marginal <= 0.0)
-                break;
-
-            // Give this core to the best workload
-            best->offset += 1;
-            best->item->weight += 1.0;  // "number of cores" for this workload
-        }
-
-        // Ensure nobody ends up with zero weight if you rely on weight in a division
-        for (auto & c : candidates)
-        {
-            if (c.item->weight <= 0.0)
-                c.item->weight = 1.0;
-        }
     }
 
     /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
