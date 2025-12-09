@@ -43,50 +43,6 @@ class FairPolicy final : public ISchedulerNode
         double vruntime = 0; /// total consumed cost divided by child weight
         double weight = 1.0;
 
-        /// almost linear
-        std::array<double, 64> speed_almost_linear =
-            [] {
-                std::array<double, 64> s{};
-                for (size_t i = 0; i < s.size(); ++i)
-                {
-                    double cores = static_cast<double>(i + 1);
-                    if (cores <= 32.0)
-                    {
-                        // Near-linear speedup
-                        s[i] = cores - 0.001 * cores;
-                    }
-                    else
-                    {
-                        // Diminishing returns after 32 cores:
-                        // every extra core adds only 0.25 "speed"
-                        double extra = cores - 32.0;
-                        s[i] = 32.0 + std::sqrt(extra);
-                    }
-                }
-                return s;
-            }();
-
-            // flattens after two core
-            std::array<double, 64> speed_two_core_limited =
-                [] {
-                    std::array<double, 64> s{};
-                    for (size_t i = 0; i < s.size(); ++i)
-                    {
-                        double cores = static_cast<double>(i + 1);
-                        if (cores <= 2.0)
-                        {
-                            // Linear: 1 core -> 1x, 2 cores -> 2x
-                            s[i] = cores - 0.001 * cores;
-                        }
-                        else
-                        {
-                            // No additional benefit beyond 2 cores
-                            s[i] = 2.0;
-                        }
-                    }
-                    return s;
-                }();
-    
         /// For min-heap by vruntime
         bool operator<(const Item & rhs) const noexcept
         {
@@ -203,6 +159,17 @@ public:
     {
         ProfileEvents::increment(ProfileEvents::FairPolicyDequeue);
 
+        // Periodic weight recompute 
+        {
+            UInt64 ns = clock_gettime_ns();
+            static constexpr UInt64 RECOMPUTE_PERIOD_NS = 1000000000ULL; // 1 second
+            if (ns > last_recompute_ns + RECOMPUTE_PERIOD_NS)
+            {
+                last_recompute_ns = ns;
+                recomputeWeights(64);   
+            }
+        }
+
         // Cycle is required to do deactivations in the case of canceled requests, when dequeueRequest returns `nullptr`
         while (true)
         {
@@ -221,7 +188,7 @@ public:
                 system_vruntime = current.vruntime;
 
                 // By definition vruntime is amount of consumed resource (cost) divided by weight
-                current.vruntime += double(request->cost) / current.child->info.weight;
+                current.vruntime += double(request->cost) / current.weight;
                 max_vruntime = std::max(max_vruntime, current.vruntime);
             }
 
@@ -316,6 +283,88 @@ private:
             parent->activateChild(this);
     }
 
+    void FairPolicy::recomputeWeights(std::size_t total_cores)
+    {
+        struct Candidate
+        {
+            Item * item;          // points into items[]
+            std::size_t offset;   // how many "cores" we've given this workload so far
+        };
+
+        std::vector<Candidate> candidates;
+        candidates.reserve(heap_size);
+
+        // Build candidate list from active children
+        for (std::size_t i = 0; i < heap_size; ++i)
+        {
+            Item & it = items[i];
+            auto & info = it.child->info;
+
+            if (!info.active_speedup)
+                continue;
+
+            uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+            if (running == 0)
+                continue; // no demand => skip
+
+            candidates.push_back(Candidate{&it, 0});
+            it.weight = 0.0; // we'll recompute from scratch
+        }
+
+        if (candidates.empty())
+            return;
+
+        // Greedily assign cores one by one
+        for (std::size_t core = 0; core < total_cores; ++core)
+        {
+            Candidate * best = nullptr;
+            double best_marginal = -std::numeric_limits<double>::infinity();
+
+            for (auto & c : candidates)
+            {
+                auto & info = c.item->child->info;
+                const auto * speed = info.active_speedup;
+
+                // Current cores allocated to this workload:
+                std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
+
+                // Total speedup at k and k+1 "cores"
+                double s0 = (*speed)[k];
+                double s1 = (*speed)[std::min(k + 1, total_cores - 1)];
+                double marginal = s1 - s0; // Δspeedup for an extra core
+
+                // Normalize by demand (running queries) so we prefer workloads
+                // where this extra core helps more *per query*:
+                uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                if (running == 0)
+                    continue;
+
+                double effective = marginal / static_cast<double>(running);
+
+                if (effective > best_marginal)
+                {
+                    best_marginal = effective;
+                    best = &c;
+                }
+            }
+
+            // No more positive gain
+            if (!best || best_marginal <= 0.0)
+                break;
+
+            // Give this core to the best workload
+            best->offset += 1;
+            best->item->weight += 1.0;  // "number of cores" for this workload
+        }
+
+        // Ensure nobody ends up with zero weight if you rely on weight in a division
+        for (auto & c : candidates)
+        {
+            if (c.item->weight <= 0.0)
+                c.item->weight = 1.0;
+        }
+    }
+
     /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
     /// Next go inactive children in unsorted order.
     /// NOTE: we have to track vruntime of inactive children for max-min fairness.
@@ -325,6 +374,7 @@ private:
     /// Last request vruntime
     double system_vruntime = 0;
     double max_vruntime = 0;
+    UInt64 last_recompute_ns = 0;   /// last time we recomputed weights
     UInt64 last_reset_ns = 0;
 
     /// All children with ownership
