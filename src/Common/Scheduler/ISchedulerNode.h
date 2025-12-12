@@ -95,13 +95,15 @@ struct SchedulerNodeInfo
             for (size_t i = 0; i < s.size(); ++i)
             {
                 double cores = static_cast<double>(i);
-                if (cores <= 2.0)
+                if (cores <= 2.1)
                 {
-                    s[i] = cores - 0.001 * (cores - 1) * cores;
+                    s[0] = 0;
+                    s[1] = 0.9;
+                    s[2] = 1.5;
                 }
                 else
                 {
-                    s[i] = 2.0;
+                    s[i] = 1.51;
                 }
             }
             return s;
