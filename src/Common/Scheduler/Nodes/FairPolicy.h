@@ -356,7 +356,7 @@ private:
 
             // Give this core to the best workload
             best->offset += 1;
-            best->item->weight += 1.0;  // "number of cores" for this workload
+            best->item->weight += best->offset;  // "number of cores" for this workload
         }
 
         // Ensure nobody ends up with zero weight if you rely on weight in a division

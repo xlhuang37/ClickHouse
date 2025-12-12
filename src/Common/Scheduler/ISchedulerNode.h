@@ -70,7 +70,7 @@ struct SchedulerNodeInfo
             std::array<double, 64> s{};
             for (size_t i = 0; i < s.size(); ++i)
             {
-                double cores = static_cast<double>(i + 1);
+                double cores = static_cast<double>(i);
                 if (cores <= 32.0)
                 {
                     // Near-linear speedup
@@ -94,7 +94,7 @@ struct SchedulerNodeInfo
             std::array<double, 64> s{};
             for (size_t i = 0; i < s.size(); ++i)
             {
-                double cores = static_cast<double>(i + 1);
+                double cores = static_cast<double>(i);
                 if (cores <= 2.0)
                 {
                     s[i] = cores - 0.001 * (cores - 1) * cores;
