@@ -98,12 +98,12 @@ struct SchedulerNodeInfo
                 if (cores <= 2.1)
                 {
                     s[0] = 0;
-                    s[1] = 0.9;
-                    s[2] = 1.5;
+                    s[1] = 1;
+                    s[2] = 1.9999;
                 }
                 else
                 {
-                    s[i] = 1.51;
+                    s[i] = 2.9;
                 }
             }
             return s;
