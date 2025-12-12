@@ -324,13 +324,13 @@ private:
 
             for (auto & c : candidates)
             {
+                auto & info = c.item->child->info;
                 // Normalize by demand (running queries) so we prefer workloads
                 // where this extra core helps more *per query*:
                 uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
                 if (running == 0)
                     continue;
-
-                auto & info = c.item->child->info;
+                    
                 const auto * speed = info.active_speedup;
 
                 std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
