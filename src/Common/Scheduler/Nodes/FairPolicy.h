@@ -324,26 +324,24 @@ private:
 
             for (auto & c : candidates)
             {
-                auto & info = c.item->child->info;
-                const auto * speed = info.active_speedup;
-
-                // Current cores allocated to this workload:
-                std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
-
-                // Total speedup at k and k+1 "cores"
-                double s0 = (*speed)[k];
-                double s1 = (*speed)[std::min(k + 1, total_cores - 1)];
-                double marginal = s1 - s0; // Δspeedup for an extra core
-
                 // Normalize by demand (running queries) so we prefer workloads
                 // where this extra core helps more *per query*:
                 uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
                 if (running == 0)
                     continue;
 
-                double effective = marginal / static_cast<double>(running);
+                auto & info = c.item->child->info;
+                const auto * speed = info.active_speedup;
 
-                if (effective > best_marginal)
+                std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
+                k = k / static_cast<double>(running);
+
+                // Total speedup at k and k+1 "cores"
+                double s0 = (*speed)[k];
+                double s1 = (*speed)[std::min(k + 1, total_cores - 1)];
+                double marginal = s1 - s0; // Δspeedup for an extra core
+
+                if (marginal > best_marginal)
                 {
                     best_marginal = effective;
                     best = &c;
@@ -351,8 +349,8 @@ private:
             }
 
             // No more positive gain
-            if (!best || best_marginal <= 0.0)
-                break;
+            // if (!best || best_marginal <= 0.0)
+            //     break;
 
             // Give this core to the best workload
             best->offset += 1;
@@ -362,7 +360,7 @@ private:
         // Ensure nobody ends up with zero weight if you rely on weight in a division
         for (auto & c : candidates)
         {
-            if (c.item->weight <= 0.0)
+            if (c.item->weight <= 1.0)
                 c.item->weight = 1.0;
         }
     }
