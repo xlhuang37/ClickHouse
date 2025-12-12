@@ -343,7 +343,7 @@ private:
 
                 if (marginal > best_marginal)
                 {
-                    best_marginal = effective;
+                    best_marginal = marginal;
                     best = &c;
                 }
             }
