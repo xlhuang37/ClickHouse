@@ -334,7 +334,7 @@ private:
                 const auto * speed = info.active_speedup;
 
                 std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
-                k = k / static_cast<double>(running);
+                k = k / static_cast<size_t>(running);
 
                 // Total speedup at k and k+1 "cores"
                 double s0 = (*speed)[k];
