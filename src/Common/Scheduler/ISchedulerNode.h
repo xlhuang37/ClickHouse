@@ -65,49 +65,76 @@ struct SchedulerNodeInfo
     /// Speedup vs. core count (index i = cores-1).
     ///  - Almost linear until 32 cores.
     ///  - After 32 cores, still increases but with smaller per-core gain.
-    const std::array<double, 64> parallel_speedup =
-        [] {
-            std::array<double, 64> s{};
-            for (size_t i = 0; i < s.size(); ++i)
-            {
-                double cores = static_cast<double>(i);
-                if (cores <= 32.0)
-                {
-                    // Near-linear speedup
-                    s[i] = cores - 0.001 * (cores - 1) * cores;
-                }
-                else
-                {
-                    // Diminishing returns after 32 cores:
-                    // every extra core adds only 0.25 "speed"
-                    s[i] = 32.0 + (cores - 32.0) * 0.25;
-                }
-            }
-            return s;
-        }();
-
+    const std::array<double, 64> parallel_speedup = {
+        1.0000,   // 1 core
+        1.9836,   // 2 cores
+        2.9424,   // 3 cores
+        3.7905,   // 4 cores
+        4.6265,   // 5 cores
+        5.4625,   // 6 cores
+        6.2985,   // 7 cores
+        7.1345,   // 8 cores
+        7.9705,   // 9 cores
+        8.8065,   // 10 cores
+        9.6425,   // 11 cores
+        10.4785,  // 12 cores
+        11.3138,  // 13 cores
+        12.1491,  // 14 cores
+        12.9844,  // 15 cores
+        13.7840,  // 16 cores
+        14.5836,  // 17 cores
+        15.3832,  // 18 cores
+        16.1828,  // 19 cores
+        16.9294,  // 20 cores
+        17.6760,  // 21 cores
+        18.4226,  // 22 cores
+        19.1692,  // 23 cores
+        19.9158,  // 24 cores
+        20.6624,  // 25 cores
+        21.4090,  // 26 cores
+        22.1556,  // 27 cores
+        22.8429,  // 28 cores
+        23.5302,  // 29 cores
+        24.2175,  // 30 cores
+        24.7708,  // 31 cores
+        25.3241,  // 32 cores
+        25.8774,  // 33 cores
+        26.4307,  // 34 cores
+        26.9059,  // 35 cores
+        27.3811,  // 36 cores
+        27.8563,  // 37 cores
+        28.3315,  // 38 cores
+        28.8067,  // 39 cores
+        29.2320,  // 40 cores
+        29.6573,  // 41 cores
+        30.0826,  // 42 cores
+        30.4246,  // 43 cores
+        30.7666,  // 44 cores
+        30.9294,  // 45 cores
+        31.0922,  // 46 cores
+        // Flat from here (repeat last value)
+        31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922,
+        31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922
+    };
+    
     /// Speedup vs. core count for almost-serial workload:
     ///  - Almost linear up to 2 cores.
     ///  - Completely flat after 2 cores.
-    const std::array<double, 64> nonparallel_speedup =
-        [] {
-            std::array<double, 64> s{};
-            for (size_t i = 0; i < s.size(); ++i)
-            {
-                double cores = static_cast<double>(i);
-                if (cores <= 2.1)
-                {
-                    s[0] = 0;
-                    s[1] = 1;
-                    s[2] = 1.9999;
-                }
-                else
-                {
-                    s[i] = 2.9;
-                }
-            }
-            return s;
-        }();
+    const std::array<double, 64> nonparallel_speedup = [] {
+        std::array<double, 64> s{};
+        // Your measured values
+        s[0] = 1.0000;
+        s[1] = 1.7136;
+        s[2] = 2.3222;
+        s[3] = 2.9216;
+        s[4] = 3.3425;
+        s[5] = 3.5962;
+        // Fill remaining with last value
+        for (size_t i = 6; i < s.size(); ++i) {
+            s[i] = 3.5962;
+        }
+        return s;
+    }();
 
     const std::array<double, 64> * active_speedup = nullptr;
 
