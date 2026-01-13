@@ -66,6 +66,7 @@ struct SchedulerNodeInfo
     ///  - Almost linear until 32 cores.
     ///  - After 32 cores, still increases but with smaller per-core gain.
     const std::array<double, 64> parallel_speedup = {
+        0.0000,   // 0 cores
         1.0000,   // 1 core
         1.9836,   // 2 cores
         2.9424,   // 3 cores
@@ -114,7 +115,7 @@ struct SchedulerNodeInfo
         31.0922,  // 46 cores
         // Flat from here (repeat last value)
         31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922,
-        31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922
+        31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922
     };
     
     /// Speedup vs. core count for almost-serial workload:
@@ -123,15 +124,12 @@ struct SchedulerNodeInfo
     const std::array<double, 64> nonparallel_speedup = [] {
         std::array<double, 64> s{};
         // Your measured values
-        s[0] = 1.0000;
-        s[1] = 1.7136;
-        s[2] = 2.3222;
-        s[3] = 2.9216;
-        s[4] = 3.3425;
-        s[5] = 3.5962;
+        S[0] = 0.0000;
+        s[1] = 1.0000;
+        s[2] = 1.7136;
         // Fill remaining with last value
-        for (size_t i = 6; i < s.size(); ++i) {
-            s[i] = 3.5962;
+        for (size_t i = 3; i < s.size(); ++i) {
+            s[i] = 1.7136;
         }
         return s;
     }();
