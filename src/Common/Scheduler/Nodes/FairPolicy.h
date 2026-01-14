@@ -301,12 +301,13 @@ private:
             {
                 Item * item;          // points into items[]
                 std::size_t offset;   // how many "cores" we've given this workload so far
+                uint32_t running;     // fixed running query count captured before loop
             };
 
             std::vector<Candidate> candidates;
             candidates.reserve(heap_size);
 
-            // Build candidate list from active children
+            // Build candidate list from active children and capture running queries
             for (std::size_t i = 0; i < heap_size; ++i)
             {
                 Item & it = items[i];
@@ -315,10 +316,11 @@ private:
                 if (!info.active_speedup)
                     continue;
             
-                if(info.runtime_stats->running_queries.load(std::memory_order_relaxed) == 0)
+                uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                if (running == 0)
                     continue;
 
-                candidates.push_back(Candidate{&it, 0});
+                candidates.push_back(Candidate{&it, 0, running});
             }
 
             if (candidates.empty())
@@ -333,16 +335,10 @@ private:
                 for (auto & c : candidates)
                 {
                     auto & info = c.item->child->info;
-                    // Normalize by demand (running queries) so we prefer workloads
-                    // where this extra core helps more *per query*:
-                    uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-                    if (running == 0)
-                        continue;
-                        
                     const auto * speed = info.active_speedup;
 
                     std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
-                    k = k / static_cast<size_t>(running);
+                    k = k / static_cast<size_t>(c.running);
 
                     // Total speedup at k and k+1 "cores"
                     double s0 = (*speed)[k];
@@ -356,9 +352,8 @@ private:
                     }
                 }
 
-                // No more positive gain
-                // if (!best || best_marginal <= 0.0)
-                //     break;
+                if (!best)
+                    break;
 
                 // Give this core to the best workload
                 best->offset += 1;
@@ -382,8 +377,6 @@ private:
                 CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(items[1].weight));
                 CurrentMetrics::set(CurrentMetrics::WhichSpeedUpTwo, static_cast<Int64>(items[1].child->info.class_index));
             } 
-
-
     }
 
         /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
