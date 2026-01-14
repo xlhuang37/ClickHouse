@@ -390,6 +390,8 @@ private:
             {
                 auto & info2 = candidates[1].item->child->info;
                 uint32_t running2 = info2.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running2));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(candidates[1].item->weight));
 
             }
             else
