@@ -29,6 +29,7 @@
 #include <Common/scope_guard_safe.h>
 #include <Common/setThreadName.h>
 #include <Common/typeid_cast.h>
+#include <Common/Scheduler/IResourceManager.h>
 #include <Parsers/ASTSetQuery.h>
 #include <Processors/Formats/IOutputFormat.h>
 #include <Processors/Port.h>
@@ -605,6 +606,21 @@ void HTTPHandler::processQuery(
         };
     }
 
+    /// Track workload query start/end for resource management
+    String workload_name;
+    IResourceManager * manager = nullptr;
+    bool willUpdate = false;
+    Field field;
+    if (settings.tryGet("workload", field))
+    {
+        workload_name = field.safeGet<String>();
+        if (!workload_name.empty() && workload_name.compare("default")) {
+            manager = context->getResourceManager();
+            manager->updateConfigurationQueryStart(workload_name);
+            willUpdate = true;
+        }
+    }
+
     executeQuery(
         std::move(in),
         *used_output.out_maybe_delayed_and_compressed,
@@ -615,6 +631,10 @@ void HTTPHandler::processQuery(
         handle_exception_in_output_format,
         query_finish_callback,
         http_continue_callback);
+
+    if (willUpdate) {
+        manager->updateConfigurationQueryEnd(workload_name);
+    }
 }
 
 bool HTTPHandler::trySendExceptionToClient(
