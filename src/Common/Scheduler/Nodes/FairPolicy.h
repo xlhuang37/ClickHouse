@@ -365,7 +365,6 @@ private:
                 best->item->weight += best->offset;  // "number of cores" for this workload
             }
 
-            // Ensure nobody ends up with zero weight if you rely on weight in a division
             for (auto & c : candidates)
             {
                 if (c.item->weight <= 1.0)
@@ -390,8 +389,8 @@ private:
             {
                 auto & info2 = candidates[1].item->child->info;
                 uint32_t running2 = info2.runtime_stats->running_queries.load(std::memory_order_relaxed);
-                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running2));
-                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(candidates[1].item->weight));
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(running2));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(candidates[1].item->weight));
 
             }
             else
