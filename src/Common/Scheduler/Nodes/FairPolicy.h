@@ -368,10 +368,10 @@ private:
 
             uint32_t running1 = items[0].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
             CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running1));
-            CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(items[0]->weight));
+            CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(items[0].weight));
             uint32_t running2 = items[1].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
             CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(running2));
-            CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(items[1]->weight));
+            CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(items[1].weight));
         }
 
         /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
