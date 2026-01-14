@@ -313,12 +313,7 @@ private:
                 if (!info.active_speedup)
                     continue;
 
-                uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-                if (running == 0)
-                    continue; // no demand => skip
-
                 candidates.push_back(Candidate{&it, 0});
-                it.weight = 0.0; // we'll recompute from scratch
             }
 
             if (candidates.empty())
@@ -362,7 +357,7 @@ private:
 
                 // Give this core to the best workload
                 best->offset += 1;
-                best->item->weight += best->offset;  // "number of cores" for this workload
+                best->item->weight = best->offset;  // "number of cores" for this workload
             }
 
             for (auto & c : candidates)
@@ -371,33 +366,12 @@ private:
                     c.item->weight = 1.0;
             }
 
-            // Record metrics for workload classes
-            if (candidates.size() >= 1)
-            {
-                auto & info1 = candidates[0].item->child->info;
-                uint32_t running1 = info1.runtime_stats->running_queries.load(std::memory_order_relaxed);
-                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running1));
-                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(candidates[0].item->weight));
-            }
-            else
-            {
-                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, 0);
-                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, 0);
-            }
-
-            if (candidates.size() >= 2)
-            {
-                auto & info2 = candidates[1].item->child->info;
-                uint32_t running2 = info2.runtime_stats->running_queries.load(std::memory_order_relaxed);
-                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(running2));
-                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(candidates[1].item->weight));
-
-            }
-            else
-            {
-                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, 0);
-                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, 0);
-            }
+            uint32_t running1 = items[0].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+            CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running1));
+            CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(items[0]->weight));
+            uint32_t running2 = items[1].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+            CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(running2));
+            CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(items[1]->weight));
         }
 
         /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
