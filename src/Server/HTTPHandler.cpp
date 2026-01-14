@@ -608,7 +608,7 @@ void HTTPHandler::processQuery(
 
     /// Track workload query start/end for resource management
     String workload_name;
-    IResourceManager * manager = nullptr;
+    ResourceManagerPtr manager;
     bool willUpdate = false;
     Field field;
     if (settings.tryGet("workload", field))
