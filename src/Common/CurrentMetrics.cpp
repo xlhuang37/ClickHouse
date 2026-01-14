@@ -468,8 +468,10 @@
     \
     M(CurrNumQueryClassOne, "Current number of running queries for workload class one in FairPolicy scheduler") \
     M(CurrWeightClassOne, "Current weight assigned to workload class one in FairPolicy scheduler") \
+    M(WhichSpeedUpOne, "Just a simple way to see which speed up is being used for this") \
     M(CurrNumQueryClassTwo, "Current number of running queries for workload class two in FairPolicy scheduler") \
     M(CurrWeightClassTwo, "Current weight assigned to workload class two in FairPolicy scheduler") \
+    M(WhichSpeedUpTwo, "Just a simple way to see which speed up is being used for this") \
 
 
 #ifdef APPLY_FOR_EXTERNAL_METRICS

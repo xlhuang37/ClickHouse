@@ -22,8 +22,10 @@ namespace CurrentMetrics
 {
     extern const Metric CurrNumQueryClassOne;
     extern const Metric CurrWeightClassOne;
+    extern const Metric WhichSpeedUpOne;
     extern const Metric CurrNumQueryClassTwo;
     extern const Metric CurrWeightClassTwo;
+    extern const Metric WhichSpeedUpTwo;
 }
 
 namespace DB
@@ -312,6 +314,9 @@ private:
 
                 if (!info.active_speedup)
                     continue;
+            
+                if(info.runtime_stats->running_queries.load(std::memory_order_relaxed) == 0)
+                    continue;
 
                 candidates.push_back(Candidate{&it, 0});
             }
@@ -366,13 +371,20 @@ private:
                     c.item->weight = 1.0;
             }
 
-            uint32_t running1 = items[0].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-            CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running1));
-            CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(items[0].weight));
-            uint32_t running2 = items[1].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-            CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(running2));
-            CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(items[1].weight));
-        }
+            if (items.size() >= 1) {
+                uint32_t running1 = items[0].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running1));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(items[0].weight));
+                CurrentMetrics::set(CurrentMetrics::WhichSpeedUpOne, static_cast<Int64>(items[0].child->info.class_index));
+            } else if (items.size() >= 2) {
+                uint32_t running2 = items[1].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(running2));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(items[1].weight));
+                CurrentMetrics::set(CurrentMetrics::WhichSpeedUpTwo, static_cast<Int64>(items[1].child->info.class_index));
+            } 
+
+
+    }
 
         /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
         /// Next go inactive children in unsorted order.
