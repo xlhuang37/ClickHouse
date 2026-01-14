@@ -323,6 +323,13 @@ private:
                 candidates.push_back(Candidate{&it, 0, running});
             }
 
+            if (candidates.size() >= 1) {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(candidates[0].running));
+            }
+            if (candidates.size() >= 2) {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(candidates[1].running));
+            } 
+
             if (candidates.empty())
                 return;
 
@@ -366,18 +373,17 @@ private:
                     c.item->weight = 1.0;
             }
 
-            if (items.size() >= 1) {
-                uint32_t running1 = items[0].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running1));
-                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(items[0].weight));
-                CurrentMetrics::set(CurrentMetrics::WhichSpeedUpOne, static_cast<Int64>(items[0].child->info.class_index));
-            } else if (items.size() >= 2) {
-                uint32_t running2 = items[1].child->info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(running2));
-                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(items[1].weight));
-                CurrentMetrics::set(CurrentMetrics::WhichSpeedUpTwo, static_cast<Int64>(items[1].child->info.class_index));
+            if (candidates.size() >= 1) {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(candidates[0].running));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(candidates[0].item->weight));
+                CurrentMetrics::set(CurrentMetrics::WhichSpeedUpOne, static_cast<Int64>(candidates[0].item->child->info.class_index));
+            }
+            if (candidates.size() >= 2) {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(candidates[1].running));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(candidates[1].item->weight));
+                CurrentMetrics::set(CurrentMetrics::WhichSpeedUpTwo, static_cast<Int64>(candidates[1].item->child->info.class_index));
             } 
-    }
+        }
 
         /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
         /// Next go inactive children in unsorted order.
