@@ -135,6 +135,7 @@ struct SchedulerNodeInfo
     }();
 
     const std::array<double, 64> * active_speedup = nullptr;
+    const int class_index = 0;
 
     /// Arbitrary data accessed/stored by parent
     union {
@@ -211,11 +212,13 @@ struct SchedulerNodeInfo
     void useParallelSpeedupProfile()
     {
         active_speedup = &parallel_speedup;
+        class_index = 1;
     }
 
     void useNonParallelSpeedupProfile()
     {
         active_speedup = &nonparallel_speedup;
+        class_index = 2;
     }
 };
 
