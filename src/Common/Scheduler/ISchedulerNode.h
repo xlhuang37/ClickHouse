@@ -135,7 +135,7 @@ struct SchedulerNodeInfo
     }();
 
     const std::array<double, 64> * active_speedup = nullptr;
-    const int class_index = 0;
+    int class_index = 0;
 
     /// Arbitrary data accessed/stored by parent
     union {
