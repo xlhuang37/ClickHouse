@@ -5,6 +5,7 @@
 #include <Common/Stopwatch.h>
 
 #include <Common/ProfileEvents.h>
+#include <Common/CurrentMetrics.h>
 
 #include <algorithm>
 #include <optional>
@@ -15,6 +16,14 @@ namespace ProfileEvents
 {
     extern const Event FairPolicyDequeue;
     extern const Event RecomputeWeight;
+}
+
+namespace CurrentMetrics
+{
+    extern const Metric CurrNumQueryClassOne;
+    extern const Metric CurrWeightClassOne;
+    extern const Metric CurrNumQueryClassTwo;
+    extern const Metric CurrWeightClassTwo;
 }
 
 namespace DB
@@ -285,100 +294,125 @@ private:
             parent->activateChild(this);
     }
 
-    void recomputeWeights(std::size_t total_cores)
-    {
-        struct Candidate
-        {
-            Item * item;          // points into items[]
-            std::size_t offset;   // how many "cores" we've given this workload so far
-        };
-
-        std::vector<Candidate> candidates;
-        candidates.reserve(heap_size);
-
-        // Build candidate list from active children
-        for (std::size_t i = 0; i < heap_size; ++i)
-        {
-            Item & it = items[i];
-            auto & info = it.child->info;
-
-            if (!info.active_speedup)
-                continue;
-
-            uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
-            if (running == 0)
-                continue; // no demand => skip
-
-            candidates.push_back(Candidate{&it, 0});
-            it.weight = 0.0; // we'll recompute from scratch
-        }
-
-        if (candidates.empty())
-            return;
-
-        // Greedily assign cores one by one
-        for (std::size_t core = 0; core < total_cores; ++core)
-        {
-            Candidate * best = nullptr;
-            double best_marginal = -std::numeric_limits<double>::infinity();
-
-            for (auto & c : candidates)
+    void recomputeWeights(std::size_t total_cores) {
+            struct Candidate
             {
-                auto & info = c.item->child->info;
-                // Normalize by demand (running queries) so we prefer workloads
-                // where this extra core helps more *per query*:
+                Item * item;          // points into items[]
+                std::size_t offset;   // how many "cores" we've given this workload so far
+            };
+
+            std::vector<Candidate> candidates;
+            candidates.reserve(heap_size);
+
+            // Build candidate list from active children
+            for (std::size_t i = 0; i < heap_size; ++i)
+            {
+                Item & it = items[i];
+                auto & info = it.child->info;
+
+                if (!info.active_speedup)
+                    continue;
+
                 uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
                 if (running == 0)
-                    continue;
-                    
-                const auto * speed = info.active_speedup;
+                    continue; // no demand => skip
 
-                std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
-                k = k / static_cast<size_t>(running);
-
-                // Total speedup at k and k+1 "cores"
-                double s0 = (*speed)[k];
-                double s1 = (*speed)[std::min(k + 1, total_cores - 1)];
-                double marginal = s1 - s0; // Δspeedup for an extra core
-
-                if (marginal > best_marginal)
-                {
-                    best_marginal = marginal;
-                    best = &c;
-                }
+                candidates.push_back(Candidate{&it, 0});
+                it.weight = 0.0; // we'll recompute from scratch
             }
 
-            // No more positive gain
-            // if (!best || best_marginal <= 0.0)
-            //     break;
+            if (candidates.empty())
+                return;
 
-            // Give this core to the best workload
-            best->offset += 1;
-            best->item->weight += best->offset;  // "number of cores" for this workload
+            // Greedily assign cores one by one
+            for (std::size_t core = 0; core < total_cores; ++core)
+            {
+                Candidate * best = nullptr;
+                double best_marginal = -std::numeric_limits<double>::infinity();
+
+                for (auto & c : candidates)
+                {
+                    auto & info = c.item->child->info;
+                    // Normalize by demand (running queries) so we prefer workloads
+                    // where this extra core helps more *per query*:
+                    uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                    if (running == 0)
+                        continue;
+                        
+                    const auto * speed = info.active_speedup;
+
+                    std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
+                    k = k / static_cast<size_t>(running);
+
+                    // Total speedup at k and k+1 "cores"
+                    double s0 = (*speed)[k];
+                    double s1 = (*speed)[std::min(k + 1, total_cores - 1)];
+                    double marginal = s1 - s0; // Δspeedup for an extra core
+
+                    if (marginal > best_marginal)
+                    {
+                        best_marginal = marginal;
+                        best = &c;
+                    }
+                }
+
+                // No more positive gain
+                // if (!best || best_marginal <= 0.0)
+                //     break;
+
+                // Give this core to the best workload
+                best->offset += 1;
+                best->item->weight += best->offset;  // "number of cores" for this workload
+            }
+
+            // Ensure nobody ends up with zero weight if you rely on weight in a division
+            for (auto & c : candidates)
+            {
+                if (c.item->weight <= 1.0)
+                    c.item->weight = 1.0;
+            }
+
+            // Record metrics for workload classes
+            if (candidates.size() >= 1)
+            {
+                auto & info1 = candidates[0].item->child->info;
+                uint32_t running1 = info1.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(running1));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(candidates[0].item->weight));
+            }
+            else
+            {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, 0);
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, 0);
+            }
+
+            if (candidates.size() >= 2)
+            {
+                auto & info2 = candidates[1].item->child->info;
+                uint32_t running2 = info2.runtime_stats->running_queries.load(std::memory_order_relaxed);
+
+            }
+            else
+            {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, 0);
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, 0);
+            }
         }
 
-        // Ensure nobody ends up with zero weight if you rely on weight in a division
-        for (auto & c : candidates)
-        {
-            if (c.item->weight <= 1.0)
-                c.item->weight = 1.0;
-        }
-    }
+        /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
+        /// Next go inactive children in unsorted order.
+        /// NOTE: we have to track vruntime of inactive children for max-min fairness.
+        std::vector<Item> items;
+        size_t heap_size = 0;
 
-    /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
-    /// Next go inactive children in unsorted order.
-    /// NOTE: we have to track vruntime of inactive children for max-min fairness.
-    std::vector<Item> items;
-    size_t heap_size = 0;
+        /// Last request vruntime
+        double system_vruntime = 0;
+        double max_vruntime = 0;
+        UInt64 last_recompute_ns = 0;   /// last time we recomputed weights
+        UInt64 last_reset_ns = 0;
 
-    /// Last request vruntime
-    double system_vruntime = 0;
-    double max_vruntime = 0;
-    UInt64 last_recompute_ns = 0;   /// last time we recomputed weights
-    UInt64 last_reset_ns = 0;
-
-    /// All children with ownership
-    std::unordered_map<String, SchedulerNodePtr> children; // basename -> child
-};
+        /// All children with ownership
+        std::unordered_map<String, SchedulerNodePtr> children; // basename -> child
+    };
 
 }

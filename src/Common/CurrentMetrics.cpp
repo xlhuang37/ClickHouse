@@ -465,6 +465,11 @@
     M(DropDistributedCacheThreadsScheduled, "Number of queued or active jobs in the threadpool for drop distributed cache.") \
     \
     M(S3CachedCredentialsProviders, "Total number of cached credentials providers") \
+    \
+    M(CurrNumQueryClassOne, "Current number of running queries for workload class one in FairPolicy scheduler") \
+    M(CurrWeightClassOne, "Current weight assigned to workload class one in FairPolicy scheduler") \
+    M(CurrNumQueryClassTwo, "Current number of running queries for workload class two in FairPolicy scheduler") \
+    M(CurrWeightClassTwo, "Current weight assigned to workload class two in FairPolicy scheduler") \
 
 
 #ifdef APPLY_FOR_EXTERNAL_METRICS
