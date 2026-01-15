@@ -606,18 +606,18 @@ void HTTPHandler::processQuery(
         };
     }
 
-    /// Track workload query start/end for resource management
-    String workload_name;
-    ResourceManagerPtr manager;
-    bool willUpdate = false;
-    Field field;
-    if (settings.tryGet("workload", field))
+    /// RAII guard to track workload query count - automatically decrements on scope exit (including exceptions)
+    WorkloadQueryCountGuard workload_guard;
     {
-        workload_name = field.safeGet<String>();
-        if (!workload_name.empty() && workload_name.compare("default")) {
-            manager = context->getResourceManager();
-            manager->updateConfigurationQueryStart(workload_name);
-            willUpdate = true;
+        Field field;
+        if (settings.tryGet("workload", field))
+        {
+            String workload_name = field.safeGet<String>();
+            if (!workload_name.empty() && workload_name != "default")
+            {
+                ResourceManagerPtr manager = context->getResourceManager();
+                workload_guard = WorkloadQueryCountGuard(manager, workload_name);
+            }
         }
     }
 
@@ -631,10 +631,6 @@ void HTTPHandler::processQuery(
         handle_exception_in_output_format,
         query_finish_callback,
         http_continue_callback);
-
-    if (willUpdate) {
-        manager->updateConfigurationQueryEnd(workload_name);
-    }
 }
 
 bool HTTPHandler::trySendExceptionToClient(

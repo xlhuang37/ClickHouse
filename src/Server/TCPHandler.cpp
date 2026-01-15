@@ -1366,21 +1366,20 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         pipeline.setConcurrencyControl(state.query_context->getSettingsRef()[Setting::use_concurrency_control]);
         CurrentMetrics::Increment query_thread_metric_increment{CurrentMetrics::QueryThread};
 
+        /// RAII guard to track workload query count - automatically decrements on scope exit (including exceptions)
         Field field;
         const Settings& settings = state.query_context->getSettingsRef();
-        ResourceManagerPtr manager;
-        String workload_name;
-        bool willUpdate = false;
+        WorkloadQueryCountGuard workload_guard;
+
+
         if (settings.tryGet("workload", field))
         {
-            workload_name = field.safeGet<String>();
-            if (!workload_name.empty() && workload_name.compare("default")) {
-                manager = state.query_context->getResourceManager();
-                manager->updateConfigurationQueryStart(workload_name);
-                willUpdate = true;
+            String workload_name = field.safeGet<String>();
+            if (!workload_name.empty() && workload_name != "default")
+            {
+                ResourceManagerPtr manager = state.query_context->getResourceManager();
+                workload_guard = WorkloadQueryCountGuard(manager, workload_name);
             }
-        } else {
-            assert(0);
         }
 
         
@@ -1432,10 +1431,6 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
           *  and there could be ongoing calculations in other threads at the same time.
           */
 
-
-        if(willUpdate) {
-            manager->updateConfigurationQueryEnd(workload_name);
-        }
         std::lock_guard lock(callback_mutex);
 
         receivePacketsExpectCancel(state);
