@@ -81,72 +81,73 @@ public:
 
 using ResourceManagerPtr = std::shared_ptr<IResourceManager>;
 
-}
-
 /*
  * RAII guard for tracking workload query count.
  * Automatically increments query count on construction and decrements on destruction.
  * This ensures proper cleanup even when exceptions are thrown.
  */
- class WorkloadQueryCountGuard : private boost::noncopyable
- {
- public:
-     WorkloadQueryCountGuard() = default;
+class WorkloadQueryCountGuard : private boost::noncopyable
+{
+public:
+    WorkloadQueryCountGuard() = default;
  
-     WorkloadQueryCountGuard(ResourceManagerPtr manager_, const String & workload_name_)
-         : manager(std::move(manager_))
-         , workload_name(workload_name_)
-     {
-         if (manager && !workload_name.empty() && workload_name != "default")
-         {
-             manager->updateConfigurationQueryStart(workload_name);
-             active = true;
-         }
-     }
+    WorkloadQueryCountGuard(ResourceManagerPtr manager_, const String & workload_name_)
+        : manager(std::move(manager_))
+        , workload_name(workload_name_)
+        , active(false)
+    {
+        if (manager && !workload_name.empty() && workload_name != "default")
+        {
+            manager->updateConfigurationQueryStart(workload_name);
+            active = true;
+        }
+    }
  
-     /// Move constructor - transfers ownership
-     WorkloadQueryCountGuard(WorkloadQueryCountGuard && other) noexcept
-         : manager(std::move(other.manager))
-         , workload_name(std::move(other.workload_name))
-         , active(other.active)
-     {
-         other.active = false;
-     }
+    /// Move constructor - transfers ownership
+    WorkloadQueryCountGuard(WorkloadQueryCountGuard && other) noexcept
+        : manager(std::move(other.manager))
+        , workload_name(std::move(other.workload_name))
+        , active(other.active)
+    {
+        other.active = false;
+    }
  
      /// Move assignment - transfers ownership
-     WorkloadQueryCountGuard & operator=(WorkloadQueryCountGuard && other) noexcept
-     {
-         if (this != &other)
-         {
-             release();
-             manager = std::move(other.manager);
-             workload_name = std::move(other.workload_name);
-             active = other.active;
-             other.active = false;
-         }
-         return *this;
-     }
+    WorkloadQueryCountGuard & operator=(WorkloadQueryCountGuard && other) noexcept
+    {
+        if (this != &other)
+        {
+            release();
+            manager = std::move(other.manager);
+            workload_name = std::move(other.workload_name);
+            active = other.active;
+            other.active = false;
+        }
+        return *this;
+    }
  
-     ~WorkloadQueryCountGuard()
-     {
-         release();
-     }
+    ~WorkloadQueryCountGuard()
+    {
+        release();
+    }
  
-     /// Manually release the guard (decrements count if active)
-     void release()
-     {
-         if (active && manager)
-         {
-             manager->updateConfigurationQueryEnd(workload_name);
-             active = false;
-         }
-     }
+    /// Manually release the guard (decrements count if active)
+    void release()
+    {
+        if (active && manager)
+        {
+            manager->updateConfigurationQueryEnd(workload_name);
+            active = false;
+        }
+    }
  
-     /// Check if this guard is actively tracking a workload
-     bool isActive() const { return active; }
+    /// Check if this guard is actively tracking a workload
+    bool isActive() const { return active; }
  
- private:
-     ResourceManagerPtr manager;
-     String workload_name;
-     bool active = false;
- };
+private:
+    ResourceManagerPtr manager;
+    String workload_name;
+    bool active = false;
+};
+
+}
