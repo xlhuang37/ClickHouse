@@ -65,65 +65,69 @@ struct SchedulerNodeInfo
     /// Speedup vs. core count (index i = cores-1).
     ///  - Almost linear until 32 cores.
     ///  - After 32 cores, still increases but with smaller per-core gain.
-    const std::array<double, 64> parallel_speedup = {
-        0.0000,   // 0 cores
-        1.0000,   // 1 core
-        1.9836,   // 2 cores
-        2.9424,   // 3 cores
-        3.7905,   // 4 cores
-        4.6265,   // 5 cores
-        5.4625,   // 6 cores
-        6.2985,   // 7 cores
-        7.1345,   // 8 cores
-        7.9705,   // 9 cores
-        8.8065,   // 10 cores
-        9.6425,   // 11 cores
-        10.4785,  // 12 cores
-        11.3138,  // 13 cores
-        12.1491,  // 14 cores
-        12.9844,  // 15 cores
-        13.7840,  // 16 cores
-        14.5836,  // 17 cores
-        15.3832,  // 18 cores
-        16.1828,  // 19 cores
-        16.9294,  // 20 cores
-        17.6760,  // 21 cores
-        18.4226,  // 22 cores
-        19.1692,  // 23 cores
-        19.9158,  // 24 cores
-        20.6624,  // 25 cores
-        21.4090,  // 26 cores
-        22.1556,  // 27 cores
-        22.8429,  // 28 cores
-        23.5302,  // 29 cores
-        24.2175,  // 30 cores
-        24.7708,  // 31 cores
-        25.3241,  // 32 cores
-        25.8774,  // 33 cores
-        26.4307,  // 34 cores
-        26.9059,  // 35 cores
-        27.3811,  // 36 cores
-        27.8563,  // 37 cores
-        28.3315,  // 38 cores
-        28.8067,  // 39 cores
-        29.2320,  // 40 cores
-        29.6573,  // 41 cores
-        30.0826,  // 42 cores
-        30.4246,  // 43 cores
-        30.7666,  // 44 cores
-        30.9294,  // 45 cores
-        31.0922,  // 46 cores
-        // Flat from here (repeat last value)
-        31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922,
-        31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922
-    };
+    const std::array<double, 120> parallel_speedup = [] {
+        std::array<double, 120> s{};
+        // Measured values
+        s[0]  = 0.0000;   // 0 cores
+        s[1]  = 1.0000;   // 1 core
+        s[2]  = 1.9836;   // 2 cores
+        s[3]  = 2.9424;   // 3 cores
+        s[4]  = 3.7905;   // 4 cores
+        s[5]  = 4.6265;   // 5 cores
+        s[6]  = 5.4625;   // 6 cores
+        s[7]  = 6.2985;   // 7 cores
+        s[8]  = 7.1345;   // 8 cores
+        s[9]  = 7.9705;   // 9 cores
+        s[10] = 8.8065;   // 10 cores
+        s[11] = 9.6425;   // 11 cores
+        s[12] = 10.4785;  // 12 cores
+        s[13] = 11.3138;  // 13 cores
+        s[14] = 12.1491;  // 14 cores
+        s[15] = 12.9844;  // 15 cores
+        s[16] = 13.7840;  // 16 cores
+        s[17] = 14.5836;  // 17 cores
+        s[18] = 15.3832;  // 18 cores
+        s[19] = 16.1828;  // 19 cores
+        s[20] = 16.9294;  // 20 cores
+        s[21] = 17.6760;  // 21 cores
+        s[22] = 18.4226;  // 22 cores
+        s[23] = 19.1692;  // 23 cores
+        s[24] = 19.9158;  // 24 cores
+        s[25] = 20.6624;  // 25 cores
+        s[26] = 21.4090;  // 26 cores
+        s[27] = 22.1556;  // 27 cores
+        s[28] = 22.8429;  // 28 cores
+        s[29] = 23.5302;  // 29 cores
+        s[30] = 24.2175;  // 30 cores
+        s[31] = 24.7708;  // 31 cores
+        s[32] = 25.3241;  // 32 cores
+        s[33] = 25.8774;  // 33 cores
+        s[34] = 26.4307;  // 34 cores
+        s[35] = 26.9059;  // 35 cores
+        s[36] = 27.3811;  // 36 cores
+        s[37] = 27.8563;  // 37 cores
+        s[38] = 28.3315;  // 38 cores
+        s[39] = 28.8067;  // 39 cores
+        s[40] = 29.2320;  // 40 cores
+        s[41] = 29.6573;  // 41 cores
+        s[42] = 30.0826;  // 42 cores
+        s[43] = 30.4246;  // 43 cores
+        s[44] = 30.7666;  // 44 cores
+        s[45] = 30.9294;  // 45 cores
+        s[46] = 31.0922;  // 46 cores
+        // Fill remaining with last value
+        for (size_t i = 47; i < s.size(); ++i) {
+            s[i] = 31.0922;
+        }
+        return s;
+    }();
     
     /// Speedup vs. core count for almost-serial workload:
     ///  - Almost linear up to 2 cores.
     ///  - Completely flat after 2 cores.
-    const std::array<double, 64> nonparallel_speedup = [] {
-        std::array<double, 64> s{};
-        // Your measured values
+    const std::array<double, 120> nonparallel_speedup = [] {
+        std::array<double, 120> s{};
+        // Measured values
         s[0] = 0.0000;
         s[1] = 1.0000;
         s[2] = 1.9136;
@@ -134,7 +138,7 @@ struct SchedulerNodeInfo
         return s;
     }();
 
-    const std::array<double, 64> * active_speedup = nullptr;
+    const std::array<double, 120> * active_speedup = nullptr;
     int class_index = 0;
 
     /// Arbitrary data accessed/stored by parent

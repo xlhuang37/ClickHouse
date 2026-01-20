@@ -179,7 +179,7 @@ public:
             {
                 last_recompute_ns = ns;
                 ProfileEvents::increment(ProfileEvents::RecomputeWeight);
-                recomputeWeights(64);   
+                recomputeWeights(120);   
             }
         }
 
