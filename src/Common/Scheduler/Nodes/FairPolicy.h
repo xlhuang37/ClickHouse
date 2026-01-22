@@ -337,7 +337,7 @@ private:
             for (std::size_t core = 0; core < total_cores; ++core)
             {
                 Candidate * best = nullptr;
-                double best_marginal = -std::numeric_limits<double>::infinity();
+                double best_marginal = 0;
 
                 for (auto & c : candidates)
                 {
