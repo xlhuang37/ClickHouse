@@ -364,7 +364,7 @@ private:
 
                 // Give this core to the best workload
                 best->offset += 1;
-                best->item->weight = best->offset;  // "number of cores" for this workload
+                best->item->weight = c.item->child->info.active_speedup[best->offset];  // "number of cores" for this workload
             }
 
             for (auto & c : candidates)
