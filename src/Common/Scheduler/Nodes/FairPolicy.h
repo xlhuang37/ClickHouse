@@ -368,7 +368,7 @@ private:
 
             for (auto & c : candidates)
             {
-                c.item->weight = c.item->child->info.active_speedup[c.offset];
+                c.item->weight = (*c.item->child->info.active_speedup)[c.offset];
                 if (c.item->weight <= 1.0)
                     c.item->weight = 1.0;
             }
