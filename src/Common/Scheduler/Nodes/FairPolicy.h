@@ -301,7 +301,9 @@ private:
             {
                 Item * item;          // points into items[]
                 std::size_t offset;   // how many "cores" we've given this workload so far
+                double weight;
                 uint32_t running;     // fixed running query count captured before loop
+
             };
 
             std::vector<Candidate> candidates;
@@ -320,7 +322,7 @@ private:
                 if (running == 0)
                     continue;
 
-                candidates.push_back(Candidate{&it, 0, running});
+                candidates.push_back(Candidate{&it, 0, 0.0, running});
             }
 
             if (candidates.size() >= 1) {
@@ -363,12 +365,13 @@ private:
                     break;
 
                 // Give this core to the best workload
+                best->weight += best_marginal;
                 best->offset += 1;
             }
 
             for (auto & c : candidates)
             {
-                c.item->weight = (*c.item->child->info.active_speedup)[c.offset / c.running] * c.running;
+                c.item->weight = c.weight;
                 if (c.item->weight <= 1.0)
                     c.item->weight = 1.0;
             }
