@@ -380,7 +380,7 @@ private:
             }
             if (candidates.size() >= 2) {
                 CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(candidates[1].running));
-                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(candidates[1].item->weight));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(candidates[1].item->weight + 0.5));
                 CurrentMetrics::set(CurrentMetrics::WhichSpeedUpTwo, static_cast<Int64>(candidates[1].item->child->info.class_index));
             } 
         }
