@@ -365,7 +365,7 @@ private:
                     break;
 
                 // Give this core to the best workload
-                best->weight += best_marginal;
+                best->weight += 1;
                 best->offset += 1;
             }
 
