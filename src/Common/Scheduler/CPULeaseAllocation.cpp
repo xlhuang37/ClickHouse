@@ -36,6 +36,7 @@ namespace ProfileEvents
     extern const Event ConcurrencyControlPreemptedMicroseconds;
     extern const Event ConcurrencyControlSlotsAcquired;
     extern const Event ConcurrencyControlPreemptions;
+    extern const Event ConcurrencyControlPreemptionResumes;
     extern const Event ConcurrencyControlUpscales;
     extern const Event ConcurrencyControlDownscales;
 }
@@ -359,6 +360,8 @@ void CPULeaseAllocation::setPreempted(size_t thread_num)
 
 void CPULeaseAllocation::resetPreempted(size_t thread_num)
 {
+    ProfileEvents::increment(ProfileEvents::ConcurrencyControlPreemptionResumes);
+
     // When resumed thread acquires one granted slot
     --granted;
     if (granted <= 0 && !exception)
