@@ -90,7 +90,7 @@ public:
     ///   2. Async tasks from fast_task_queue for other threads
     ///   3. Regular tasks from task_queue for specified thread
     ///   4. Regular tasks from task_queue for other threads
-    void tryGetTask(ExecutionThreadContext & context);
+    bool tryGetTask(ExecutionThreadContext & context);
 
     // Adds regular tasks from `queue` and async tasks from `async_queue` into queues for specified thread `context`.
     // Local task optimization: the first regular task could be placed directly into thread to be executed next.

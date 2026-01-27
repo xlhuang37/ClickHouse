@@ -343,8 +343,32 @@ void PipelineExecutor::executeStepImpl(size_t thread_num, IAcquiredSlot * cpu_sl
     while (!tasks.isFinished() && !yield)
     {
         /// First, find any processor to execute.
-        while (!tasks.isFinished() && !context.hasTask())
-            tasks.tryGetTask(context);
+        while (!tasks.isFinished() && !context.hasTask()) {
+            if (!tasks.tryGetTask(context)) {
+                /// Preemption and downscaling.
+                if (cpu_helper.isRenewNeeded()) // Check if preemption is enabled (see `cpu_slot_preemption` server setting)
+                {
+                    try
+                    {
+                        // Preemption point. Renewal could block execution due to CPU overload.
+                        // It may trigger callbacks to tasks.preempt() and tasks.resume()
+                        if (!cpu_helper.renew())
+                        {
+                            tasks.downscale(cpu_helper.id());
+                            yield = true;
+                            break; // Downscaling. Unable to renew the lease - thread should stop (but could be rerun later).
+                        }
+                    }
+                    catch (...)
+                    {
+                        /// renew() can throw an exception, for example RESOURCE_ACCESS_DENIED.
+                        /// We should cancel execution properly before rethrow.
+                        cancel(ExecutionStatus::Exception);
+                        throw;
+                    }
+                }
+            }
+        }
 
         while (!tasks.isFinished() && context.hasTask() && !yield)
         {

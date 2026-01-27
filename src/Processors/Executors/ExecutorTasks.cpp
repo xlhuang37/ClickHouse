@@ -79,7 +79,7 @@ ExecutorTasks::SpawnStatus ExecutorTasks::tryWakeUpAnyOtherThreadWithTasksInQueu
     return result;
 }
 
-void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
+bool ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
 {
     {
         std::unique_lock lock(mutex);
@@ -90,7 +90,7 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
             if (auto res = async_task_queue.tryGetReadyTask(lock))
             {
                 context.setTask(static_cast<ExecutingGraph::Node *>(res.data));
-                return;
+                return true;
             }
         }
     #endif
@@ -113,7 +113,7 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
             /// We have to wake up at least one thread if there are pending tasks.
             /// That thread will wake up other threads during its `tryGetTask()` call if any.
             tryWakeUpAnyOtherThreadWithTasks(context, lock);
-            return;
+            return true;
         }
 
         /// This thread has no tasks to do and is going to wait.
@@ -123,7 +123,7 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
         {
             lock.unlock();
             finish();
-            return;
+            return true;
         }
 
     #if defined(OS_LINUX)
@@ -134,20 +134,17 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
             if (!res)
             {
                 if (finished)
-                    return;
+                    return true;
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Empty task was returned from async task queue");
             }
 
             context.setTask(static_cast<ExecutingGraph::Node *>(res.data));
-            return;
+            return true;
         }
     #endif
 
-        /// Enqueue thread into stack of waiting threads.
-        threads_queue.push(context.thread_number);
+       return false;
     }
-
-    context.wait(finished);
 }
 
 ExecutorTasks::SpawnStatus ExecutorTasks::pushTasks(Queue & queue, Queue & async_queue, ExecutionThreadContext & context)
