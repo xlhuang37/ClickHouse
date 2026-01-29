@@ -122,6 +122,8 @@ public:
     explicit WorkloadResourceManager(IWorkloadEntityStorage & storage_);
     ~WorkloadResourceManager() override;
     void updateConfiguration(const Poco::Util::AbstractConfiguration & config) override;
+    void updateConfigurationQueryStart(const String & workload_name) override; 
+    void updateConfigurationQueryEnd(const String & workload_name) override; 
     bool hasResource(const String & resource_name) const override;
     ClassifierPtr acquire(const String & workload_name, const ClassifierSettings & settings) override;
     void forEachNode(VisitorFunc visitor) override;
@@ -171,6 +173,8 @@ private:
         void createNode(const NodeInfo & info);
         void deleteNode(const NodeInfo & info);
         void updateNode(const NodeInfo & old_info, const NodeInfo & new_info);
+        void updateNodeQueryStart(const NodeInfo & old_info);
+        void updateNodeQueryEnd(const NodeInfo & old_info);
 
         /// Updates resource entity
         void updateResource(const ASTPtr & new_resource_entity);
@@ -228,6 +232,8 @@ private:
         ~Workload();
 
         void updateWorkload(const ASTPtr & new_entity);
+        void updateWorkloadQueryStart();
+        void updateWorkloadQueryEnd();
         String getParent() const;
     };
 

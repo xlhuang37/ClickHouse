@@ -9,6 +9,7 @@
 #include <base/types.h>
 
 #include <Common/Scheduler/ResourceRequest.h>
+#include <Common/ProfileEvents.h>
 #include <Poco/Util/AbstractConfiguration.h>
 #include <Poco/Util/XMLConfiguration.h>
 
@@ -22,6 +23,10 @@
 #include <memory>
 #include <mutex>
 
+namespace ProfileEvents
+{
+    extern const Event SchedulerNodeUpdate;
+}
 
 namespace DB
 {
@@ -41,6 +46,12 @@ inline const Poco::Util::AbstractConfiguration & emptyConfig()
     return *config;
 }
 
+struct WorkloadRuntimeStats
+{
+    std::atomic<uint32_t> running_queries{0};
+    // std::atomic<double>  runtime_factor{1.0};  // multiplier on top of base weight
+ };
+
 /*
  * Info read and write for scheduling purposes by parent
  */
@@ -49,6 +60,82 @@ struct SchedulerNodeInfo
     double weight = 1.0; /// Weight of this node among it's siblings
     Priority priority; /// Priority of this node among it's siblings (lower value means higher priority)
     Int64 queue_size = std::numeric_limits<Int64>::max(); /// Size of a workload queue
+    std::shared_ptr<WorkloadRuntimeStats> runtime_stats;
+
+    /// Speedup vs. core count (index i = cores-1).
+    ///  - Almost linear until 32 cores.
+    ///  - After 32 cores, still increases but with smaller per-core gain.
+    const std::array<double, 64> parallel_speedup = {
+        0.0000,   // 0 cores
+        1.0000,   // 1 core
+        1.9836,   // 2 cores
+        2.9424,   // 3 cores
+        3.7905,   // 4 cores
+        4.6265,   // 5 cores
+        5.4625,   // 6 cores
+        6.2985,   // 7 cores
+        7.1345,   // 8 cores
+        7.9705,   // 9 cores
+        8.8065,   // 10 cores
+        9.6425,   // 11 cores
+        10.4785,  // 12 cores
+        11.3138,  // 13 cores
+        12.1491,  // 14 cores
+        12.9844,  // 15 cores
+        13.7840,  // 16 cores
+        14.5836,  // 17 cores
+        15.3832,  // 18 cores
+        16.1828,  // 19 cores
+        16.9294,  // 20 cores
+        17.6760,  // 21 cores
+        18.4226,  // 22 cores
+        19.1692,  // 23 cores
+        19.9158,  // 24 cores
+        20.6624,  // 25 cores
+        21.4090,  // 26 cores
+        22.1556,  // 27 cores
+        22.8429,  // 28 cores
+        23.5302,  // 29 cores
+        24.2175,  // 30 cores
+        24.7708,  // 31 cores
+        25.3241,  // 32 cores
+        25.8774,  // 33 cores
+        26.4307,  // 34 cores
+        26.9059,  // 35 cores
+        27.3811,  // 36 cores
+        27.8563,  // 37 cores
+        28.3315,  // 38 cores
+        28.8067,  // 39 cores
+        29.2320,  // 40 cores
+        29.6573,  // 41 cores
+        30.0826,  // 42 cores
+        30.4246,  // 43 cores
+        30.7666,  // 44 cores
+        30.9294,  // 45 cores
+        31.0922,  // 46 cores
+        // Flat from here (repeat last value)
+        31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922,
+        31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922, 31.0922
+    };
+    
+    /// Speedup vs. core count for almost-serial workload:
+    ///  - Almost linear up to 2 cores.
+    ///  - Completely flat after 2 cores.
+    const std::array<double, 64> nonparallel_speedup = [] {
+        std::array<double, 64> s{};
+        // Your measured values
+        s[0] = 0.0000;
+        s[1] = 1.0000;
+        s[2] = 1.9136;
+        // Fill remaining with last value
+        for (size_t i = 3; i < s.size(); ++i) {
+            s[i] = 1.9136;
+        }
+        return s;
+    }();
+
+    const std::array<double, 64> * active_speedup = nullptr;
+    int class_index = 0;
 
     /// Arbitrary data accessed/stored by parent
     union {
@@ -56,19 +143,33 @@ struct SchedulerNodeInfo
         void * ptr;
     } parent;
 
-    SchedulerNodeInfo() = default;
+    SchedulerNodeInfo()
+        : runtime_stats(std::make_shared<WorkloadRuntimeStats>())
+    {}
 
     explicit SchedulerNodeInfo(double weight_, Priority priority_ = {})
+        : runtime_stats(std::make_shared<WorkloadRuntimeStats>())
     {
         setWeight(weight_);
         setPriority(priority_);
     }
 
-    explicit SchedulerNodeInfo(const Poco::Util::AbstractConfiguration & config, const String & config_prefix = {})
+    explicit SchedulerNodeInfo(const Poco::Util::AbstractConfiguration & config, const String & config_prefix = {}) 
+        : runtime_stats(std::make_shared<WorkloadRuntimeStats>())
     {
         setWeight(config.getDouble(config_prefix + ".weight", weight));
         setPriority(config.getInt64(config_prefix + ".priority", priority));
         setQueueSize(config.getInt64(config_prefix + ".queue_size", queue_size));
+    }
+
+    void updateRuntimeStatQueryStart() {
+        ProfileEvents::increment(ProfileEvents::SchedulerNodeUpdate);
+        runtime_stats->running_queries.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void updateRuntimeStatQueryEnd() {
+        ProfileEvents::increment(ProfileEvents::SchedulerNodeUpdate);
+        runtime_stats->running_queries.fetch_sub(1, std::memory_order_relaxed);
     }
 
     void setWeight(double value)
@@ -106,6 +207,18 @@ struct SchedulerNodeInfo
     {
         // `parent` data is not compared intentionally (it is not part of configuration settings)
         return weight == o.weight && priority == o.priority;
+    }
+
+    void useParallelSpeedupProfile()
+    {
+        active_speedup = &parallel_speedup;
+        class_index = 1;
+    }
+
+    void useNonParallelSpeedupProfile()
+    {
+        active_speedup = &nonparallel_speedup;
+        class_index = 2;
     }
 };
 

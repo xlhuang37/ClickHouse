@@ -4,11 +4,29 @@
 
 #include <Common/Stopwatch.h>
 
+#include <Common/ProfileEvents.h>
+#include <Common/CurrentMetrics.h>
+
 #include <algorithm>
 #include <optional>
 #include <unordered_map>
 #include <vector>
 
+namespace ProfileEvents
+{
+    extern const Event FairPolicyDequeue;
+    extern const Event RecomputeWeight;
+}
+
+namespace CurrentMetrics
+{
+    extern const Metric CurrNumQueryClassOne;
+    extern const Metric CurrWeightClassOne;
+    extern const Metric WhichSpeedUpOne;
+    extern const Metric CurrNumQueryClassTwo;
+    extern const Metric CurrWeightClassTwo;
+    extern const Metric WhichSpeedUpTwo;
+}
 
 namespace DB
 {
@@ -35,6 +53,7 @@ class FairPolicy final : public ISchedulerNode
     {
         ISchedulerNode * child = nullptr;
         double vruntime = 0; /// total consumed cost divided by child weight
+        double weight = 1.0;
 
         /// For min-heap by vruntime
         bool operator<(const Item & rhs) const noexcept
@@ -150,6 +169,20 @@ public:
 
     std::pair<ResourceRequest *, bool> dequeueRequest() override
     {
+        ProfileEvents::increment(ProfileEvents::FairPolicyDequeue);
+
+        // Periodic weight recompute 
+        {
+            UInt64 ns = clock_gettime_ns();
+            static constexpr UInt64 RECOMPUTE_PERIOD_NS = 1000000000ULL; // 1 second
+            if (ns > last_recompute_ns + RECOMPUTE_PERIOD_NS)
+            {
+                last_recompute_ns = ns;
+                ProfileEvents::increment(ProfileEvents::RecomputeWeight);
+                recomputeWeights(64);   
+            }
+        }
+
         // Cycle is required to do deactivations in the case of canceled requests, when dequeueRequest returns `nullptr`
         while (true)
         {
@@ -168,7 +201,7 @@ public:
                 system_vruntime = current.vruntime;
 
                 // By definition vruntime is amount of consumed resource (cost) divided by weight
-                current.vruntime += double(request->cost) / current.child->info.weight;
+                current.vruntime += double(request->cost) / current.weight;
                 max_vruntime = std::max(max_vruntime, current.vruntime);
             }
 
@@ -263,19 +296,109 @@ private:
             parent->activateChild(this);
     }
 
-    /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
-    /// Next go inactive children in unsorted order.
-    /// NOTE: we have to track vruntime of inactive children for max-min fairness.
-    std::vector<Item> items;
-    size_t heap_size = 0;
+    void recomputeWeights(std::size_t total_cores) {
+            struct Candidate
+            {
+                Item * item;          // points into items[]
+                std::size_t offset;   // how many "cores" we've given this workload so far
+                uint32_t running;     // fixed running query count captured before loop
+            };
 
-    /// Last request vruntime
-    double system_vruntime = 0;
-    double max_vruntime = 0;
-    UInt64 last_reset_ns = 0;
+            std::vector<Candidate> candidates;
+            candidates.reserve(heap_size);
 
-    /// All children with ownership
-    std::unordered_map<String, SchedulerNodePtr> children; // basename -> child
-};
+            // Build candidate list from active children and capture running queries
+            for (std::size_t i = 0; i < heap_size; ++i)
+            {
+                Item & it = items[i];
+                auto & info = it.child->info;
+
+                if (!info.active_speedup)
+                    continue;
+            
+                uint32_t running = info.runtime_stats->running_queries.load(std::memory_order_relaxed);
+                if (running == 0)
+                    continue;
+
+                candidates.push_back(Candidate{&it, 0, running});
+            }
+
+            if (candidates.size() >= 1) {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(candidates[0].running));
+            }
+            if (candidates.size() >= 2) {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(candidates[1].running));
+            } 
+
+            if (candidates.empty())
+                return;
+
+            // Greedily assign cores one by one
+            for (std::size_t core = 0; core < total_cores; ++core)
+            {
+                Candidate * best = nullptr;
+                double best_marginal = -std::numeric_limits<double>::infinity();
+
+                for (auto & c : candidates)
+                {
+                    auto & info = c.item->child->info;
+                    const auto * speed = info.active_speedup;
+
+                    std::size_t k = std::min<std::size_t>(c.offset, total_cores - 1);
+                    k = k / static_cast<size_t>(c.running);
+
+                    // Total speedup at k and k+1 "cores"
+                    double s0 = (*speed)[k];
+                    double s1 = (*speed)[std::min(k + 1, total_cores - 1)];
+                    double marginal = s1 - s0; // Δspeedup for an extra core
+
+                    if (marginal > best_marginal)
+                    {
+                        best_marginal = marginal;
+                        best = &c;
+                    }
+                }
+
+                if (!best)
+                    break;
+
+                // Give this core to the best workload
+                best->offset += 1;
+                best->item->weight = best->offset;  // "number of cores" for this workload
+            }
+
+            for (auto & c : candidates)
+            {
+                if (c.item->weight <= 1.0)
+                    c.item->weight = 1.0;
+            }
+
+            if (candidates.size() >= 1) {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassOne, static_cast<Int64>(candidates[0].running));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassOne, static_cast<Int64>(candidates[0].item->weight));
+                CurrentMetrics::set(CurrentMetrics::WhichSpeedUpOne, static_cast<Int64>(candidates[0].item->child->info.class_index));
+            }
+            if (candidates.size() >= 2) {
+                CurrentMetrics::set(CurrentMetrics::CurrNumQueryClassTwo, static_cast<Int64>(candidates[1].running));
+                CurrentMetrics::set(CurrentMetrics::CurrWeightClassTwo, static_cast<Int64>(candidates[1].item->weight));
+                CurrentMetrics::set(CurrentMetrics::WhichSpeedUpTwo, static_cast<Int64>(candidates[1].item->child->info.class_index));
+            } 
+        }
+
+        /// Beginning of `items` vector is heap of active children: [0; `heap_size`).
+        /// Next go inactive children in unsorted order.
+        /// NOTE: we have to track vruntime of inactive children for max-min fairness.
+        std::vector<Item> items;
+        size_t heap_size = 0;
+
+        /// Last request vruntime
+        double system_vruntime = 0;
+        double max_vruntime = 0;
+        UInt64 last_recompute_ns = 0;   /// last time we recomputed weights
+        UInt64 last_reset_ns = 0;
+
+        /// All children with ownership
+        std::unordered_map<String, SchedulerNodePtr> children; // basename -> child
+    };
 
 }

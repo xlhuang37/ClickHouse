@@ -29,6 +29,7 @@
 #include <Common/scope_guard_safe.h>
 #include <Common/setThreadName.h>
 #include <Common/typeid_cast.h>
+#include <Common/Scheduler/IResourceManager.h>
 #include <Parsers/ASTSetQuery.h>
 #include <Processors/Formats/IOutputFormat.h>
 #include <Processors/Port.h>
@@ -603,6 +604,21 @@ void HTTPHandler::processQuery(
                 response.sendContinue();
             }
         };
+    }
+
+    /// RAII guard to track workload query count - automatically decrements on scope exit (including exceptions)
+    WorkloadQueryCountGuard workload_guard;
+    {
+        Field field;
+        if (settings.tryGet("workload", field))
+        {
+            String workload_name = field.safeGet<String>();
+            if (!workload_name.empty() && workload_name != "default")
+            {
+                ResourceManagerPtr manager = context->getResourceManager();
+                workload_guard = WorkloadQueryCountGuard(manager, workload_name);
+            }
+        }
     }
 
     executeQuery(

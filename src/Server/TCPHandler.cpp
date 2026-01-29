@@ -59,6 +59,7 @@
 #include <Common/scope_guard_safe.h>
 #include <Common/setThreadName.h>
 #include <Common/thread_local_rng.h>
+#include <Common/Scheduler/IResourceManager.h>
 
 #include <Columns/ColumnSparse.h>
 
@@ -1365,6 +1366,23 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
         pipeline.setConcurrencyControl(state.query_context->getSettingsRef()[Setting::use_concurrency_control]);
         CurrentMetrics::Increment query_thread_metric_increment{CurrentMetrics::QueryThread};
 
+        /// RAII guard to track workload query count - automatically decrements on scope exit (including exceptions)
+        Field field;
+        const Settings& settings = state.query_context->getSettingsRef();
+        WorkloadQueryCountGuard workload_guard;
+
+
+        if (settings.tryGet("workload", field))
+        {
+            String workload_name = field.safeGet<String>();
+            if (!workload_name.empty() && workload_name != "default")
+            {
+                ResourceManagerPtr manager = state.query_context->getResourceManager();
+                workload_guard = WorkloadQueryCountGuard(manager, workload_name);
+            }
+        }
+
+        
         try
         {
             Block block;
@@ -1412,7 +1430,6 @@ void TCPHandler::processOrdinaryQuery(QueryState & state)
           *  because we have not read all the data yet,
           *  and there could be ongoing calculations in other threads at the same time.
           */
-
 
         std::lock_guard lock(callback_mutex);
 

@@ -96,6 +96,14 @@ void WorkloadResourceManager::Resource::createNode(const NodeInfo & info)
     {
         auto node = std::make_shared<UnifiedSchedulerNode>(scheduler.event_queue, info.settings);
         node->basename = info.name;
+
+        // FIX: hardcoding speedup vector
+        if (info.name.find("One") != std::string::npos) {
+            node->info.useParallelSpeedupProfile();
+        } else {
+            node->info.useNonParallelSpeedupProfile();
+        }
+
         if (!info.parent.empty())
             node_for_workload[info.parent]->attachUnifiedChild(node);
         else
@@ -186,6 +194,32 @@ void WorkloadResourceManager::Resource::updateNode(const NodeInfo & old_info, co
     });
 }
 
+void WorkloadResourceManager::Resource::updateNodeQueryStart(const NodeInfo & old_info)
+{
+
+    if (!node_for_workload.contains(old_info.name))
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Node for updating workload '{}' does not exist in resource '{}'",
+            old_info.name, resource_name);
+
+    
+    auto node = node_for_workload[old_info.name];
+    
+    node->info.updateRuntimeStatQueryStart();
+}
+
+void WorkloadResourceManager::Resource::updateNodeQueryEnd(const NodeInfo & old_info)
+{
+
+    if (!node_for_workload.contains(old_info.name))
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Node for updating workload '{}' does not exist in resource '{}'",
+            old_info.name, resource_name);
+
+    
+    auto node = node_for_workload[old_info.name];
+    
+    node->info.updateRuntimeStatQueryEnd();
+}
+
 void WorkloadResourceManager::Resource::updateCurrentVersion()
 {
     auto previous_version = current_version;
@@ -248,6 +282,34 @@ void WorkloadResourceManager::Workload::updateWorkload(const ASTPtr & new_entity
     }
 }
 
+void WorkloadResourceManager::Workload::updateWorkloadQueryStart()
+{
+    try
+    {
+        for (auto & [resource_name, resource] : resource_manager->resources)
+            resource->updateNodeQueryStart(NodeInfo(resource->getUnit(), workload_entity, resource_name));
+    }
+    catch (...)
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected error in WorkloadResourceManager: {}",
+            getCurrentExceptionMessage(/* with_stacktrace = */ true));
+    }
+}
+
+void WorkloadResourceManager::Workload::updateWorkloadQueryEnd()
+{
+    try
+    {
+        for (auto & [resource_name, resource] : resource_manager->resources)
+            resource->updateNodeQueryEnd(NodeInfo(resource->getUnit(), workload_entity, resource_name));
+    }
+    catch (...)
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected error in WorkloadResourceManager: {}",
+            getCurrentExceptionMessage(/* with_stacktrace = */ true));
+    }
+}
+
 String WorkloadResourceManager::Workload::getParent() const
 {
     return assert_cast<ASTCreateWorkloadQuery *>(workload_entity.get())->getWorkloadParent();
@@ -296,6 +358,24 @@ WorkloadResourceManager::~WorkloadResourceManager()
 void WorkloadResourceManager::updateConfiguration(const Poco::Util::AbstractConfiguration &)
 {
     // No-op
+}
+
+void WorkloadResourceManager::updateConfigurationQueryStart(const String & workload_name) 
+{
+    std::unique_lock lock{mutex};
+    if (auto workload_iter = workloads.find(workload_name); workload_iter != workloads.end())
+        workload_iter->second->updateWorkloadQueryStart();
+    else
+        assert(0);
+}
+
+void WorkloadResourceManager::updateConfigurationQueryEnd(const String & workload_name) 
+{
+    std::unique_lock lock{mutex};
+    if (auto workload_iter = workloads.find(workload_name); workload_iter != workloads.end())
+        workload_iter->second->updateWorkloadQueryEnd();
+    else
+        assert(0);
 }
 
 void WorkloadResourceManager::createOrUpdateWorkload(const String & workload_name, const ASTPtr & ast)

@@ -31,6 +31,8 @@ class CustomResourceManager : public IResourceManager
 public:
     CustomResourceManager();
     void updateConfiguration(const Poco::Util::AbstractConfiguration & config) override;
+    void updateConfigurationQueryStart(const String & workload_name) override; 
+    void updateConfigurationQueryEnd(const String & workload_name) override; 
     bool hasResource(const String & resource_name) const override;
     ClassifierPtr acquire(const String & classifier_name, const ClassifierSettings & settings) override;
     void forEachNode(VisitorFunc visitor) override;
