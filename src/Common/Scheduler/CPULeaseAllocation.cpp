@@ -589,7 +589,22 @@ void CPULeaseAllocation::consume(std::unique_lock<std::mutex> & lock, ResourceCo
 
 bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 {
-    if (allocated == max_threads || shutdown)
+    /// Upper bound on in-flight CPU slot requests.
+    /// The hard cap is `max_threads`. If the pipeline exposes its number of ready tasks,
+    /// we additionally clamp to `max(tasks / 3, 1)` to avoid over-provisioning CPU
+    /// quanta for queries that cannot keep `max_threads` threads busy (e.g. blocked by
+    /// a pipeline breaker). The `max(..., 1)` floor guarantees progress:
+    ///  - at construction time the pipeline has not yet populated its queues, so
+    ///    `get_tasks_count()` returns 0 and would otherwise refuse the very first request;
+    ///  - keeping at least one request in-flight ensures `consume()` keeps re-evaluating
+    ///    the cap as new tasks appear.
+    size_t cap = max_threads;
+    if (settings.get_tasks_count)
+    {
+        size_t tasks_count = settings.get_tasks_count();
+        cap = std::min<size_t>(max_threads, std::max<size_t>(tasks_count / 3, 1));
+    }
+    if (allocated >= cap || shutdown)
         return true;
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);

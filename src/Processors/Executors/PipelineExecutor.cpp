@@ -498,6 +498,7 @@ SlotAllocationPtr PipelineExecutor::allocateCPU(size_t num_threads, bool concurr
                             .preemption_timeout = std::chrono::milliseconds(query_context->getCPUSlotPreemptionTimeout()),
                             .on_preempt = [this](size_t slot_id) { tasks.preempt(slot_id); },
                             .on_resume = [this](size_t slot_id) { tasks.resume(slot_id); },
+                            .get_tasks_count = [this]() { return tasks.getTasksCount(); },
                             .workload = query_context->getSettingsRef()[Setting::workload],
                             .trace_cpu_scheduling = trace_cpu_scheduling,
                         });

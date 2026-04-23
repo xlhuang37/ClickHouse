@@ -80,6 +80,11 @@ public:
     /// It would be called every time when processor reports read progress.
     void setReadProgressCallback(ReadProgressCallbackPtr callback);
 
+    /// Approximate number of ready tasks across all internal executor queues.
+    /// Used by CPULeaseAllocation to cap in-flight CPU slot requests proportionally to
+    /// available parallel work. Lock-free, may return a transiently stale value.
+    size_t getTasksCount() const { return tasks.getTasksCount(); }
+
 private:
     ExecutingGraphPtr graph;
 

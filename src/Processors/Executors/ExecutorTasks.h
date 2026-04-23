@@ -38,6 +38,12 @@ class ExecutorTasks
     /// For single thread, will wait for async tasks only when task_queue is empty.
     PollingQueue async_task_queue;
 
+    /// Approximate count of ready tasks across task_queue, fast_task_queue and async_task_queue.
+    /// Updated under `mutex` on every push/pop, but read lock-free (memory_order_relaxed) by the
+    /// CPU scheduler thread via getTasksCount() as a heuristic input. A transiently stale value
+    /// is acceptable here since it only informs the upper bound on in-flight CPU lease requests.
+    std::atomic<size_t> total_tasks_count{0};
+
     /// Maximum amount of threads. Constant after initialization, based on `max_threads` setting.
     size_t num_threads = 0;
 
@@ -74,6 +80,10 @@ public:
 
     void finish();
     bool isFinished() const { return finished; }
+
+    /// Approximate number of ready tasks across all internal queues.
+    /// Safe to call from any thread; returns a relaxed snapshot of an atomic counter.
+    size_t getTasksCount() const { return total_tasks_count.load(std::memory_order_relaxed); }
 
     void rethrowFirstThreadException();
 
