@@ -6,7 +6,7 @@
 #include <Common/Scheduler/Nodes/ThrottlerConstraint.h>
 #include <Common/Scheduler/Nodes/SemaphoreConstraint.h>
 #include <Common/Scheduler/ISchedulerQueue.h>
-#include <Common/Scheduler/Nodes/FifoQueue.h>
+#include <Common/Scheduler/Nodes/PriorityQueue.h>
 #include <Common/Scheduler/ISchedulerNode.h>
 #include <Common/Scheduler/WorkloadSettings.h>
 #include <Common/Exception.h>
@@ -253,7 +253,7 @@ private:
     /// Handles degenerate case of zero children (a fifo queue) or delegate to `ChildrenBranch`.
     struct QueueOrChildrenBranch
     {
-        SchedulerNodePtr queue; /// FifoQueue node is used if there are no children
+        SchedulerNodePtr queue; /// PriorityQueue node is used if there are no children
         ChildrenBranch branch; /// Used if there is at least one child
         WorkloadSettings settings;
 
@@ -302,8 +302,8 @@ private:
         {
             SchedulerNodeInfo node_info{};
             node_info.queue_size = settings.getQueueSize();
-            queue = std::make_shared<FifoQueue>(event_queue_, node_info);
-            queue->basename = "fifo";
+            queue = std::make_shared<PriorityQueue>(event_queue_, node_info);
+            queue->basename = "priority_queue";
         }
 
         void removeQueue()

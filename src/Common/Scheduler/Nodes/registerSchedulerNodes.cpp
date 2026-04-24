@@ -12,6 +12,7 @@ void registerFairPolicy(SchedulerNodeFactory &);
 void registerSemaphoreConstraint(SchedulerNodeFactory &);
 void registerThrottlerConstraint(SchedulerNodeFactory &);
 void registerFifoQueue(SchedulerNodeFactory &);
+void registerPriorityQueue(SchedulerNodeFactory &);
 
 void registerSchedulerNodes()
 {
@@ -27,6 +28,7 @@ void registerSchedulerNodes()
 
     // ISchedulerQueue
     registerFifoQueue(factory);
+    registerPriorityQueue(factory);
 }
 
 }

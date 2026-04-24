@@ -1,4 +1,5 @@
 #include <Common/Scheduler/CPULeaseAllocation.h>
+#include <Common/Scheduler/ISchedulerPriorityQueue.h>
 #include <Common/Scheduler/ISchedulerQueue.h>
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
@@ -8,6 +9,7 @@
 #include <Common/logger_useful.h>
 
 #include <atomic>
+#include <limits>
 #include <utility>
 
 #if 0
@@ -140,7 +142,7 @@ void CPULeaseAllocation::RequestChain::granted()
         head = requests.begin();
 }
 
-bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost requested_ns_)
+bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority)
 {
     chassert(!enqueued);
 
@@ -152,8 +154,12 @@ bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost r
     {
         head->is_noncompeting = false;
         // We do not use enqueueRequestUsingBudget() because it redistributes resource between requests in the queue (which might be from different queries).
-        // Instead we do budgeting for every query independently for better fairness
-        queue->enqueueRequest(&*head);
+        // Instead we do budgeting for every query independently for better fairness.
+        // All queues created via UnifiedSchedulerNode are PriorityQueue, so the downcast is expected to always succeed.
+        // The chassert guards against someone later wiring a non-priority queue here.
+        auto * pqueue = dynamic_cast<ISchedulerPriorityQueue *>(queue);
+        chassert(pqueue);
+        pqueue->enqueueRequest(&*head, priority);
         enqueued = true;
         return true; // Request is enqueued to the scheduler queue, we will wait for it to be granted
     }
@@ -589,12 +595,47 @@ void CPULeaseAllocation::consume(std::unique_lock<std::mutex> & lock, ResourceCo
 
 bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 {
-    if (allocated == max_threads || shutdown)
+    /// Upper bound on in-flight CPU slot requests.
+    /// The hard cap is `max_threads`. If the pipeline exposes its number of ready tasks,
+    /// we additionally clamp to `max(1, running_count + tasks / 3)` to avoid over-provisioning
+    /// CPU quanta for queries that cannot keep `max_threads` threads busy (e.g. blocked by a
+    /// pipeline breaker). Rationale for each term:
+    ///  - `running_count` keeps enough in-flight quanta to cover every currently running thread
+    ///    so consumption does not starve them;
+    ///  - `tasks / 3` adds headroom proportional to the amount of parallelizable work available;
+    ///  - the `max(..., 1)` floor guarantees progress at construction time (pipeline queues are
+    ///    empty and no thread is running yet, so without the floor the first request would be
+    ///    refused) and keeps at least one request in flight so `consume()` can re-evaluate the
+    ///    cap as new tasks appear.
+    size_t cap = max_threads;
+    if (settings.get_tasks_count)
+    {
+        size_t tasks_count = settings.get_tasks_count();
+        size_t desired = threads.running_count + tasks_count / 3;
+        cap = std::min<size_t>(max_threads, std::max<size_t>(desired, 1));
+    }
+    if (allocated >= cap || shutdown)
         return true;
+
+    /// Derive request priority.
+    ///
+    /// Small queries (computed cap <= 4) receive strict / absolute priority so a handful of
+    /// quanta can drain ahead of any larger query. Since we only reach this code path when
+    /// `allocated < cap`, "has not yet reached its desired capacity" is implicit.
+    ///
+    /// Larger queries share fairly using `consumed_ns` (accumulated CPU service) as the
+    /// priority value -- lower value == higher priority, so a query that has consumed less
+    /// CPU is served first. This matches the stride/virtual-time fairness pattern.
+    static constexpr size_t kSmallQueryCapThreshold = 4;
+    Priority priority{};
+    if (cap <= kSmallQueryCapThreshold)
+        priority.value = std::numeric_limits<Priority::Value>::min();
+    else
+        priority.value = consumed_ns;
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
-    if (requests.enqueue(cost, requested_ns))
+    if (requests.enqueue(cost, requested_ns, priority))
     {
         scheduled_increment.add();
         wait_timer.emplace(CurrentThread::getProfileEvents().timer(ProfileEvents::ConcurrencyControlWaitMicroseconds));
