@@ -5,6 +5,7 @@
 #include <boost/dynamic_bitset.hpp>
 #include <boost/dynamic_bitset/dynamic_bitset.hpp>
 
+#include <Common/Priority.h>
 #include <Common/Scheduler/ResourceLink.h>
 #include <Common/Scheduler/ResourceRequest.h>
 #include <Common/CurrentMetrics.h>
@@ -295,7 +296,7 @@ private:
         RequestChain(CPULeaseAllocation * lease, size_t max_threads_, ResourceLink master_link_, ResourceLink worker_link_);
         void finish();
         void granted();
-        bool enqueue(ResourceCost cost, ResourceCost requested_ns_);
+        bool enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority);
         void cancel(std::unique_lock<std::mutex> & lock);
         void scheduled();
         ResourceCost getMaxConsumed() const { return tail->max_consumed; }
