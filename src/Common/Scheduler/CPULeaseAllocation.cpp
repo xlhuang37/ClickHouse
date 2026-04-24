@@ -591,18 +591,22 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 {
     /// Upper bound on in-flight CPU slot requests.
     /// The hard cap is `max_threads`. If the pipeline exposes its number of ready tasks,
-    /// we additionally clamp to `max(tasks / 3, 1)` to avoid over-provisioning CPU
-    /// quanta for queries that cannot keep `max_threads` threads busy (e.g. blocked by
-    /// a pipeline breaker). The `max(..., 1)` floor guarantees progress:
-    ///  - at construction time the pipeline has not yet populated its queues, so
-    ///    `get_tasks_count()` returns 0 and would otherwise refuse the very first request;
-    ///  - keeping at least one request in-flight ensures `consume()` keeps re-evaluating
-    ///    the cap as new tasks appear.
+    /// we additionally clamp to `max(1, running_count + tasks / 3)` to avoid over-provisioning
+    /// CPU quanta for queries that cannot keep `max_threads` threads busy (e.g. blocked by a
+    /// pipeline breaker). Rationale for each term:
+    ///  - `running_count` keeps enough in-flight quanta to cover every currently running thread
+    ///    so consumption does not starve them;
+    ///  - `tasks / 3` adds headroom proportional to the amount of parallelizable work available;
+    ///  - the `max(..., 1)` floor guarantees progress at construction time (pipeline queues are
+    ///    empty and no thread is running yet, so without the floor the first request would be
+    ///    refused) and keeps at least one request in flight so `consume()` can re-evaluate the
+    ///    cap as new tasks appear.
     size_t cap = max_threads;
     if (settings.get_tasks_count)
     {
         size_t tasks_count = settings.get_tasks_count();
-        cap = std::min<size_t>(max_threads, std::max<size_t>(tasks_count / 3, 1));
+        size_t desired = threads.running_count + tasks_count / 3;
+        cap = std::min<size_t>(max_threads, std::max<size_t>(desired, 1));
     }
     if (allocated >= cap || shutdown)
         return true;

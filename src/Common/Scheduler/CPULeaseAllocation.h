@@ -43,8 +43,10 @@ struct CPULeaseSettings
 
     /// Callback returning the current number of ready tasks in the owning pipeline.
     /// When set, schedule() caps the number of in-flight CPU slot requests at
-    /// min(max_threads, max(n / 3, 1)), so queries that cannot fully parallelize
-    /// (e.g. behind a pipeline breaker) do not over-provision CPU quanta.
+    /// min(max_threads, max(1, running_count + n / 3)) where `running_count` is the
+    /// allocator's own count of currently running (leased & non-preempted) threads.
+    /// This prevents queries that cannot fully parallelize (e.g. behind a pipeline
+    /// breaker) from over-provisioning CPU quanta.
     /// If unset, the old behavior (cap at max_threads only) is preserved.
     std::function<size_t()> get_tasks_count;
 
