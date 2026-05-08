@@ -641,6 +641,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     else
         priority.value = consumed_ns;
 
+    priority.value = 10;
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
     if (requests.enqueue(cost, requested_ns, priority))
