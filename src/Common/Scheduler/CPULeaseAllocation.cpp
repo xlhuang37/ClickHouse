@@ -616,12 +616,12 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     ///    refused) and keeps at least one request in flight so `consume()` can re-evaluate the
     ///    cap as new tasks appear.
     size_t cap = max_threads;
-    if (settings.get_tasks_count)
-    {
-        size_t tasks_count = settings.get_tasks_count();
-        size_t desired = threads.running_count + tasks_count;
-        cap = std::min<size_t>(max_threads, std::max<size_t>(desired, 1));
-    }
+    // if (settings.get_tasks_count)
+    // {
+    //     size_t tasks_count = settings.get_tasks_count();
+    //     size_t desired = threads.running_count + tasks_count;
+    //     cap = std::min<size_t>(max_threads, std::max<size_t>(desired, 1));
+    // }
     if (allocated >= cap || shutdown)
         return true;
 
