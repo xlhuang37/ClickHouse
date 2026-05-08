@@ -17,12 +17,13 @@ SerializationSubObjectSharedData::SerializationSubObjectSharedData(
     SerializationObjectSharedData::SerializationVersion serialization_version_,
     size_t buckets_,
     const String & paths_prefix_,
-    const DataTypePtr & dynamic_type_)
+    const DataTypePtr & dynamic_type_,
+    const SerializationPtr & dynamic_serialization_)
     : serialization_version(serialization_version_)
     , buckets(buckets_)
     , paths_prefix(paths_prefix_)
     , dynamic_type(dynamic_type_)
-    , dynamic_serialization(dynamic_type->getDefaultSerialization())
+    , dynamic_serialization(dynamic_serialization_)
     , serialization_map(DataTypeObject::getTypeOfSharedData()->getDefaultSerialization())
 {
 }
@@ -68,8 +69,8 @@ void SerializationSubObjectSharedData::enumerateStreams(
     /// Paths with our prefix can be in any bucket, so we will need to check them all.
     for (size_t bucket = 0; bucket != buckets; ++bucket)
     {
-        settings.path.push_back(Substream::ObjectSharedDataBucket);
-        settings.path.back().object_shared_data_bucket = bucket;
+        settings.path.push_back(Substream::Bucket);
+        settings.path.back().bucket = bucket;
         if (serialization_version.value == SerializationObjectSharedData::SerializationVersion::MAP_WITH_BUCKETS)
         {
             auto map_data = SubstreamData(serialization_map)
@@ -143,8 +144,8 @@ void SerializationSubObjectSharedData::deserializeBinaryBulkStatePrefix(
         shared_data_state->bucket_map_states.resize(buckets);
         for (size_t bucket = 0; bucket != buckets; ++bucket)
         {
-            settings.path.push_back(Substream::ObjectSharedDataBucket);
-            settings.path.back().object_shared_data_bucket = bucket;
+            settings.path.push_back(Substream::Bucket);
+            settings.path.back().bucket = bucket;
             serialization_map->deserializeBinaryBulkStatePrefix(settings, shared_data_state->bucket_map_states[bucket], cache);
             settings.path.pop_back();
         }
@@ -154,8 +155,8 @@ void SerializationSubObjectSharedData::deserializeBinaryBulkStatePrefix(
         shared_data_state->bucket_structure_states.resize(buckets);
         for (size_t bucket = 0; bucket != buckets; ++bucket)
         {
-            settings.path.push_back(Substream::ObjectSharedDataBucket);
-            settings.path.back().object_shared_data_bucket = bucket;
+            settings.path.push_back(Substream::Bucket);
+            settings.path.back().bucket = bucket;
             shared_data_state->bucket_structure_states[bucket] = SerializationObjectSharedData::deserializeStructureStatePrefix(settings, cache);
             auto * structure_state_concrete = checkAndGetState<SerializationObjectSharedData::DeserializeBinaryBulkStateObjectSharedDataStructure>(shared_data_state->bucket_structure_states[bucket]);
             structure_state_concrete->requested_paths_prefixes.push_back(paths_prefix);
@@ -249,8 +250,8 @@ void SerializationSubObjectSharedData::deserializeBinaryBulkWithMultipleStreams(
         /// Read shared data map column from each bucket.
         for (size_t bucket = 0; bucket != buckets; ++bucket)
         {
-            settings.path.push_back(Substream::ObjectSharedDataBucket);
-            settings.path.back().object_shared_data_bucket = bucket;
+            settings.path.push_back(Substream::Bucket);
+            settings.path.back().bucket = bucket;
 
             /// Check if we have map column in cache.
             if (auto cached_column_with_num_read_rows = getColumnWithNumReadRowsFromSubstreamsCache(cache, settings.path))
@@ -278,8 +279,8 @@ void SerializationSubObjectSharedData::deserializeBinaryBulkWithMultipleStreams(
         std::vector<std::pair<size_t, size_t>> granules_offset_and_limit;
         for (size_t bucket = 0; bucket != buckets; ++bucket)
         {
-            settings.path.push_back(Substream::ObjectSharedDataBucket);
-            settings.path.back().object_shared_data_bucket = bucket;
+            settings.path.push_back(Substream::Bucket);
+            settings.path.back().bucket = bucket;
 
             auto * shared_data_structure_state = checkAndGetState<SerializationObjectSharedData::DeserializeBinaryBulkStateObjectSharedDataStructure>(sub_object_shared_data_state->bucket_structure_states[bucket]);
             auto structure_granules = SerializationObjectSharedData::deserializeStructure(rows_offset, limit, settings, *shared_data_structure_state, cache);

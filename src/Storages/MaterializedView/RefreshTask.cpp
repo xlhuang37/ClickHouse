@@ -21,6 +21,7 @@
 #include <QueryPipeline/ReadProgressCallback.h>
 #include <Storages/StorageMaterializedView.h>
 #include <Common/CurrentMetrics.h>
+#include <Common/QueryScope.h>
 #include <Common/FailPoint.h>
 #include <Common/Macros.h>
 #include <Common/ZooKeeper/ZooKeeper.h>
@@ -165,6 +166,7 @@ OwnedRefreshTask RefreshTask::create(
     task->refresh_task_watch_callback = std::make_shared<Coordination::WatchCallback>([w = task->coordination.watches, task_waker = task->refresh_task->getWatchCallback()](const Coordination::WatchResponse & response)
     {
         w->root_watch_active.store(false);
+        w->children_watch_active.store(false);
         w->should_reread_znodes.store(true);
         (*task_waker)(response);
     });
@@ -227,6 +229,11 @@ void RefreshTask::shutdown()
     set_handle.reset();
 
     view = nullptr;
+
+    /// Wake up any threads blocked in wait(), so they can see !view and throw TABLE_IS_DROPPED.
+    /// Without this, wait() would block forever after deactivate() prevents the background task
+    /// from running (and therefore from ever notifying refresh_cv).
+    refresh_cv.notify_all();
 }
 
 void RefreshTask::drop(ContextPtr context)
@@ -402,8 +409,10 @@ void RefreshTask::wait()
 
     std::unique_lock lock(mutex);
     refresh_cv.wait(lock, [&] {
-        return state != RefreshState::Running && state != RefreshState::Scheduling &&
-            state != RefreshState::RunningOnAnotherReplica && (state == RefreshState::Disabled || !scheduling.out_of_schedule_refresh_requested);
+        return !view
+            || (state != RefreshState::Running && state != RefreshState::Scheduling
+                && state != RefreshState::RunningOnAnotherReplica
+                && (state == RefreshState::Disabled || !scheduling.out_of_schedule_refresh_requested));
     });
     throw_if_error();
 
@@ -698,7 +707,7 @@ std::optional<UUID> RefreshTask::executeRefreshUnlocked(bool append, int32_t roo
             /// Create a table.
             query_for_logging = "(create target table)";
             normalized_query_hash = normalizedQueryHash(query_for_logging, false);
-            CurrentThread::QueryScope query_scope;
+            QueryScope query_scope;
             std::tie(refresh_query, query_scope) = view->prepareRefresh(append, refresh_context, table_to_drop);
             new_table_id = refresh_query->table_id;
 

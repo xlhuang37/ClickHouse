@@ -49,11 +49,10 @@ MutableColumnPtr ColumnFixedString::cloneResized(size_t size) const
     return new_col_holder;
 }
 
-DataTypePtr ColumnFixedString::getValueNameAndTypeImpl(WriteBufferFromOwnString & name_buf, size_t index, const Options &options) const
+void ColumnFixedString::getValueNameImpl(WriteBufferFromOwnString & name_buf, size_t index, const Options &options) const
 {
     if (options.notFull(name_buf))
         writeQuoted(std::string_view{reinterpret_cast<const char *>(&chars[n * index]), n}, name_buf);
-    return std::make_shared<DataTypeString>();
 }
 
 
@@ -140,6 +139,11 @@ void ColumnFixedString::skipSerializedInArena(ReadBuffer & in) const
 void ColumnFixedString::updateHashWithValue(size_t index, SipHash & hash) const
 {
     hash.update(reinterpret_cast<const char *>(&chars[n * index]), n);
+}
+
+void ColumnFixedString::updateHashWithValueRange(size_t begin, size_t end, SipHash & hash) const
+{
+    hash.update(reinterpret_cast<const char *>(&chars[n * begin]), n * (end - begin));
 }
 
 WeakHash32 ColumnFixedString::getWeakHash32() const
