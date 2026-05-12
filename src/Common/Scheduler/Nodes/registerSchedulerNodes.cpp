@@ -12,7 +12,7 @@ void registerFairPolicy(SchedulerNodeFactory &);
 void registerSemaphoreConstraint(SchedulerNodeFactory &);
 void registerThrottlerConstraint(SchedulerNodeFactory &);
 void registerFifoQueue(SchedulerNodeFactory &);
-void registerPriorityQueue(SchedulerNodeFactory &);
+void registerMultiLevelFeedbackQueue(SchedulerNodeFactory &);
 
 void registerSchedulerNodes()
 {
@@ -28,7 +28,9 @@ void registerSchedulerNodes()
 
     // ISchedulerQueue
     registerFifoQueue(factory);
-    registerPriorityQueue(factory);
+    /// Registers under both "priority_queue" (legacy name, preserved for config compat)
+    /// and "mlfq" (clearer alias). See MultiLevelFeedbackQueue.cpp.
+    registerMultiLevelFeedbackQueue(factory);
 }
 
 }

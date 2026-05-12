@@ -1,6 +1,7 @@
 #include <Common/Scheduler/CPULeaseAllocation.h>
 #include <Common/Scheduler/ISchedulerPriorityQueue.h>
 #include <Common/Scheduler/ISchedulerQueue.h>
+#include <Common/Scheduler/Nodes/MultiLevelFeedbackQueue.h>
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/CurrentThread.h>
@@ -9,7 +10,6 @@
 #include <Common/logger_useful.h>
 
 #include <atomic>
-#include <limits>
 #include <utility>
 
 #if 0
@@ -155,8 +155,9 @@ bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost r
         head->is_noncompeting = false;
         // We do not use enqueueRequestUsingBudget() because it redistributes resource between requests in the queue (which might be from different queries).
         // Instead we do budgeting for every query independently for better fairness.
-        // All queues created via UnifiedSchedulerNode are PriorityQueue, so the downcast is expected to always succeed.
-        // The chassert guards against someone later wiring a non-priority queue here.
+        // All queues created via UnifiedSchedulerNode are MultiLevelFeedbackQueue, so the downcast
+        // is expected to always succeed. The chassert guards against someone later wiring a
+        // non-priority queue here.
         auto * pqueue = dynamic_cast<ISchedulerPriorityQueue *>(queue);
         chassert(pqueue);
         pqueue->enqueueRequest(&*head, priority);
@@ -625,21 +626,25 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     if (allocated >= cap || shutdown)
         return true;
 
-    /// Derive request priority.
+    /// Derive request priority -- a discrete level in [0, MultiLevelFeedbackQueue::kPriorityLevels).
     ///
-    /// Small queries (computed cap <= 4) receive strict / absolute priority so a handful of
-    /// quanta can drain ahead of any larger query. Since we only reach this code path when
-    /// `allocated < cap`, "has not yet reached its desired capacity" is implicit.
+    /// Small queries (computed cap <= 4) are "inelastic" and receive strict / absolute
+    /// priority via the reserved level 0 so a handful of quanta can drain ahead of any
+    /// larger query. Since we only reach this code path when `allocated < cap`,
+    /// "has not yet reached its desired capacity" is implicit.
     ///
-    /// Larger queries share fairly using `consumed_ns` (accumulated CPU service) as the
-    /// priority value -- lower value == higher priority, so a query that has consumed less
-    /// CPU is served first. This matches the stride/virtual-time fairness pattern.
+    /// Larger queries share fairly across the elastic bands [1, kPriorityLevels - 1].
+    /// The band is picked from `requested_ns` (cumulative consumed + outstanding granted
+    /// quantum budget), so a query that has used less CPU sits in a higher (lower-index)
+    /// band. Compared with the previous continuous `consumed_ns / 1024^3` priority, the
+    /// discrete bands bound the number of buckets and avoid the "same age preempt each
+    /// other" thrash when two queries have near-identical virtual time.
     static constexpr size_t kSmallQueryCapThreshold = 4;
     Priority priority{};
     if (cap <= kSmallQueryCapThreshold)
-        priority.value = std::numeric_limits<Priority::Value>::min();
+        priority.value = 0; /// MLFQ inelastic level
     else
-        priority.value = consumed_ns / 1024 / 1024 / 1024;
+        priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
