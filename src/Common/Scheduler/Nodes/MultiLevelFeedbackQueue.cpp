@@ -30,19 +30,19 @@ inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>
 /// of thresholds. The last threshold is `MAX` so the highest band catches every
 /// long-running query.
 ///
-/// Roughly exponential bands (~10x per level): a query stays in level 1 for up
-/// to ~10 ms of accumulated CPU, level 2 for up to ~100 ms, and so on, falling
-/// to the lowest priority once it has accumulated more than ~10000 s of CPU.
-/// These are starting defaults; tune as needed.
+/// Exponential bands with base 64 ms and growth factor 2: a query stays in
+/// level 1 for up to 64 ms of accumulated CPU, level 2 up to 128 ms, doubling
+/// each step, falling to the lowest priority once it has accumulated more than
+/// ~4 s of CPU. These are starting defaults; tune as needed.
 inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels - 1> kElasticBandThresholdsNs = {
-    static_cast<ResourceCost>(100'000'000),         /// L1: < 10 ms cumulative CPU
-    static_cast<ResourceCost>(1'000'000'000),        /// L2: < 100 ms
-    static_cast<ResourceCost>(10'000'000'000),      /// L3: < 1 s
-    static_cast<ResourceCost>(100'000'000'000),     /// L4: < 10 s
-    static_cast<ResourceCost>(1'000'000'000'000),    /// L5: < 100 s
-    static_cast<ResourceCost>(10'000'000'000'000),  /// L6: < 1000 s
-    static_cast<ResourceCost>(100'000'000'000'000), /// L7: < 10000 s
-    std::numeric_limits<ResourceCost>::max(),      /// L8: catch-all
+    static_cast<ResourceCost>(64'000'000),       /// L1: <   64 ms cumulative CPU
+    static_cast<ResourceCost>(256'000'000),      /// L2: <  128 ms
+    static_cast<ResourceCost>(1'024'000'000),      /// L3: <  256 ms
+    static_cast<ResourceCost>(4'096'000'000),      /// L4: <  512 ms
+    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
 };
 
 static_assert(kElasticBandThresholdsNs.size() == static_cast<size_t>(kMaxElasticLevel - kMinElasticLevel + 1),
