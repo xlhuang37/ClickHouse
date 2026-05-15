@@ -617,12 +617,12 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     ///    refused) and keeps at least one request in flight so `consume()` can re-evaluate the
     ///    cap as new tasks appear.
     size_t cap = max_threads;
-    if (settings.get_tasks_count)
-    {
-        size_t tasks_count = settings.get_tasks_count();
-        size_t desired = threads.running_count + tasks_count;
-        cap = std::min<size_t>(max_threads, std::max<size_t>(desired, 1));
-    }
+    // if (settings.get_tasks_count)
+    // {
+    //     size_t tasks_count = settings.get_tasks_count();
+    //     size_t desired = threads.running_count + tasks_count;
+    //     cap = std::min<size_t>(max_threads, std::max<size_t>(desired, 1));
+    // }
     if (allocated >= cap || shutdown)
         return true;
 
@@ -639,12 +639,12 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     /// band. Compared with the previous continuous `consumed_ns / 1024^3` priority, the
     /// discrete bands bound the number of buckets and avoid the "same age preempt each
     /// other" thrash when two queries have near-identical virtual time.
-    static constexpr size_t kSmallQueryCapThreshold = 4;
-    Priority priority{};
-    if (cap <= kSmallQueryCapThreshold)
-        priority.value = 0; /// MLFQ inelastic level
-    else
-        priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
+    // static constexpr size_t kSmallQueryCapThreshold = 4;
+    // Priority priority{};
+    // if (cap <= kSmallQueryCapThreshold)
+    //     priority.value = 0; /// MLFQ inelastic level
+    // else
+    priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
