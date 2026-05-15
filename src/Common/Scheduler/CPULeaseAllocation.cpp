@@ -640,7 +640,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     /// discrete bands bound the number of buckets and avoid the "same age preempt each
     /// other" thrash when two queries have near-identical virtual time.
     // static constexpr size_t kSmallQueryCapThreshold = 4;
-    // Priority priority{};
+    Priority priority{};
     // if (cap <= kSmallQueryCapThreshold)
     //     priority.value = 0; /// MLFQ inelastic level
     // else
