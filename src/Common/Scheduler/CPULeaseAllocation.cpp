@@ -620,10 +620,9 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     if (settings.get_tasks_count)
     {
         size_t tasks_count = settings.get_tasks_count();
-        size_t desired = threads.running_count + tasks_count;
-        cap = std::min<size_t>(max_threads, std::max<size_t>(desired, threads.running_count + 1));
+        size_t cap = std::clamp(1, max_threads, tasks_count)
     }
-    if (allocated >= cap || shutdown)
+    if (allocated == max_threads || threads.running_count >= cap || shutdown)
         return true;
 
     /// Derive request priority -- a discrete level in [0, MultiLevelFeedbackQueue::kPriorityLevels).
