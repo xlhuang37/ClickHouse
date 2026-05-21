@@ -142,9 +142,18 @@ void CPULeaseAllocation::RequestChain::granted()
         head = requests.begin();
 }
 
-bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority)
+CPULeaseAllocation::RequestChain::EnqueueResult CPULeaseAllocation::RequestChain::enqueue(
+    ResourceCost cost,
+    ResourceCost requested_ns_,
+    Priority priority,
+    bool throttle_non_master)
 {
     chassert(!enqueued);
+
+    // Do not throttle the master-slot request: it must keep progressing even when
+    // worker parallelism is capped by the dynamic tasks-based limit.
+    if (throttle_non_master && !request_master_slot)
+        return EnqueueResult::Throttled;
 
     head->reset(cost);
     head->is_master_slot = std::exchange(request_master_slot, false);
@@ -162,12 +171,12 @@ bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost r
         chassert(pqueue);
         pqueue->enqueueRequest(&*head, priority);
         enqueued = true;
-        return true; // Request is enqueued to the scheduler queue, we will wait for it to be granted
+        return EnqueueResult::Enqueued; // Request is enqueued to the scheduler queue, we will wait for it to be granted
     }
     else // noncompeting slot - provide immediately for free
     {
         head->is_noncompeting = true;
-        return false; // No need to enqueue, we will grant it immediately
+        return EnqueueResult::NonCompeting; // No need to enqueue, we will grant it immediately
     }
 }
 
@@ -622,7 +631,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
         size_t tasks_count = settings.get_tasks_count();
         cap = std::max<size_t>(std::min<size_t>(max_threads, tasks_count), 4);
     }
-    if (allocated == max_threads || threads.running_count >= cap || shutdown)
+    if (allocated == max_threads || shutdown)
         return true;
 
     /// Derive request priority -- a discrete level in [0, MultiLevelFeedbackQueue::kPriorityLevels).
@@ -647,13 +656,16 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
-    if (requests.enqueue(cost, requested_ns, priority))
+    const auto enqueue_result = requests.enqueue(cost, requested_ns, priority, threads.running_count >= cap);
+    if (enqueue_result == RequestChain::EnqueueResult::Enqueued)
     {
         scheduled_increment.add();
         wait_timer.emplace(wait_counters->timer(ProfileEvents::ConcurrencyControlWaitMicroseconds));
         LOG_EVENT(E);
         return true;
     }
+    if (enqueue_result == RequestChain::EnqueueResult::Throttled)
+        return true;
     return false; // Request is noncompeting and should be granted immediately
 }
 

@@ -295,10 +295,17 @@ private:
     class RequestChain
     {
     public:
+        enum class EnqueueResult
+        {
+            Enqueued,
+            NonCompeting,
+            Throttled,
+        };
+
         RequestChain(CPULeaseAllocation * lease, size_t max_threads_, ResourceLink master_link_, ResourceLink worker_link_);
         void finish();
         void granted();
-        bool enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority);
+        EnqueueResult enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority, bool throttle_non_master);
         void cancel(std::unique_lock<std::mutex> & lock);
         void scheduled();
         ResourceCost getMaxConsumed() const { return tail->max_consumed; }
