@@ -620,7 +620,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     if (settings.get_tasks_count)
     {
         size_t tasks_count = settings.get_tasks_count();
-        size_t cap = std::max(std::min(max_threads, tasks_count), 4);
+        cap = std::max(std::min(max_threads, tasks_count), 4);
     }
     if (allocated == max_threads || threads.running_count >= cap || shutdown)
         return true;
