@@ -629,7 +629,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     if (settings.get_tasks_count)
     {
         size_t tasks_count = settings.get_tasks_count();
-        cap = std::max<size_t>(std::min<size_t>(max_threads, tasks_count), 4);
+        cap = std::max<size_t>(std::min<size_t>(max_threads, tasks_count), 2);
     }
     if (allocated == max_threads || shutdown)
         return true;
@@ -647,7 +647,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     /// band. Compared with the previous continuous `consumed_ns / 1024^3` priority, the
     /// discrete bands bound the number of buckets and avoid the "same age preempt each
     /// other" thrash when two queries have near-identical virtual time.
-    static constexpr size_t kSmallQueryCapThreshold = 4;
+    static constexpr size_t kSmallQueryCapThreshold = 2;
     Priority priority{};
     if (cap <= kSmallQueryCapThreshold)
         priority.value = 0; /// MLFQ inelastic level
