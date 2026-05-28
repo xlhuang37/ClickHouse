@@ -15,33 +15,25 @@ namespace DB
 // MLFQ hardcoded configuration. All tuning knobs live in this single block.
 // ---------------------------------------------------------------------------
 
-/// Reserved priority level for inelastic / strict-priority requests
-/// (e.g. small CPU-lease queries with `cap <= kSmallQueryCapThreshold`).
-inline constexpr Priority::Value kInelasticLevel = 0;
-
 /// Inclusive range of elastic levels, chosen by `pickElasticLevel()` from
-/// cumulative CPU consumption.
-inline constexpr Priority::Value kMinElasticLevel = 1;
+/// cumulative CPU consumption. Every level participates in the elastic
+/// distribution; there is no reserved inelastic / strict-priority band.
+inline constexpr Priority::Value kMinElasticLevel = 0;
 inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>(MultiLevelFeedbackQueue::kPriorityLevels) - 1;
 
 /// Upper bound (exclusive) on cumulative CPU consumption (`consumed + granted`,
-/// expressed in nanoseconds) for each elastic band. There are
-/// `kMaxElasticLevel - kMinElasticLevel + 1` bands and therefore the same number
-/// of thresholds. The last threshold is `MAX` so the highest band catches every
-/// long-running query.
-///
-/// Exponential bands with base 64 ms and growth factor 2: a query stays in
-/// level 1 for up to 64 ms of accumulated CPU, level 2 up to 128 ms, doubling
-/// each step, falling to the lowest priority once it has accumulated more than
-/// ~4 s of CPU. These are starting defaults; tune as needed.
-inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels - 1> kElasticBandThresholdsNs = {
-    static_cast<ResourceCost>(4'096'000'000),      /// L3: <  256 ms
-    static_cast<ResourceCost>(32'384'000'000),      /// L4: <  512 ms
-    static_cast<ResourceCost>(256'536'000'000),      /// L4: <  512 ms
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
+/// expressed in nanoseconds) for each elastic band. There is one threshold per
+/// priority level (`kPriorityLevels` entries). The last threshold is `MAX` so
+/// the lowest-priority band catches every long-running query.
+inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels> kElasticBandThresholdsNs = {
+    static_cast<ResourceCost>(4'096'000'000),    /// L0: <    4 s
+    static_cast<ResourceCost>(32'384'000'000),   /// L1: <   32 s
+    static_cast<ResourceCost>(256'536'000'000),  /// L2: <  256 s
+    std::numeric_limits<ResourceCost>::max(),    /// L3: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L4: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L5: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L6: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L7: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
 };
 
@@ -52,7 +44,7 @@ static_assert(kElasticBandThresholdsNs.size() == static_cast<size_t>(kMaxElastic
 
 Priority::Value MultiLevelFeedbackQueue::pickElasticLevel(ResourceCost cumulative_cpu_ns)
 {
-    /// Clamp negatives (e.g. arithmetic overflow upstream) to zero so we still hit L1.
+    /// Clamp negatives (e.g. arithmetic overflow upstream) to zero so we still hit L0.
     if (cumulative_cpu_ns < 0)
         cumulative_cpu_ns = 0;
 
