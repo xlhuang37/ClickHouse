@@ -656,7 +656,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
-    const auto enqueue_result = requests.enqueue(cost, requested_ns, priority, cap < threads.running_count);
+    const auto enqueue_result = requests.enqueue(cost, requested_ns, priority, cap < allocated);
     if (enqueue_result == RequestChain::EnqueueResult::Enqueued)
     {
         scheduled_increment.add();
