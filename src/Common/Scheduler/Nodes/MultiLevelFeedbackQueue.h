@@ -35,13 +35,16 @@ namespace ErrorCodes
  *  - removes the "infinitesimal granularity" thrash where two requests with priority
  *    values one apart would constantly preempt each other.
  *
- * Level 0 is reserved for inelastic/strict-priority traffic (e.g. small CPU-lease
- * queries with `cap <= kSmallQueryCapThreshold`). Levels 1..(kPriorityLevels-1) are
- * elastic bands; the caller decides which band by passing a `Priority{value}` whose
- * `value` is the bucket index. Any out-of-range value is clamped into [0, kPriorityLevels-1].
+ * In the current configuration the queue is reduced to two levels, which is effectively
+ * a FIFO queue with an "Inelastic First" (IF) override:
+ *   - Level 0 is reserved for inelastic/strict-priority traffic (e.g. small CPU-lease
+ *     queries with `cap <= kSmallQueryCapThreshold`).
+ *   - Level 1 is the single elastic FIFO band that catches everything else.
+ * Any `Priority{value}` outside [0, kPriorityLevels-1] is clamped into that range.
  *
  * Mapping a query's cumulative CPU consumption (consumed + granted, i.e.
- * `CPULeaseAllocation::requested_ns`) to a band is done by `pickElasticLevel()` (see .cpp).
+ * `CPULeaseAllocation::requested_ns`) to a band is done by `pickElasticLevel()` (see .cpp);
+ * with a single elastic band it always returns level 1.
  *
  * Dequeue scans levels 0..K-1 in order and pops the FIFO front of the first non-empty
  * bucket. Cancel is O(1) via a `request -> bucket_index` reverse map.
@@ -55,7 +58,9 @@ class MultiLevelFeedbackQueue final : public ISchedulerPriorityQueue
 public:
     /// Number of priority levels. Level 0 = highest (inelastic); level K-1 = lowest.
     /// Kept in the header so `CPULeaseAllocation` can reason about valid level indices.
-    static constexpr size_t kPriorityLevels = 9;
+    /// Currently set to 2: one inelastic level (0) and one elastic FIFO band (1),
+    /// reducing MLFQ to a FIFO queue with Inelastic First (IF) override.
+    static constexpr size_t kPriorityLevels = 2;
 
     MultiLevelFeedbackQueue(EventQueue * event_queue_, const Poco::Util::AbstractConfiguration & config, const String & config_prefix)
         : ISchedulerPriorityQueue(event_queue_, config, config_prefix)

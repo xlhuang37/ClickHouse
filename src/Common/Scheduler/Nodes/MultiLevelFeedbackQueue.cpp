@@ -20,7 +20,8 @@ namespace DB
 inline constexpr Priority::Value kInelasticLevel = 0;
 
 /// Inclusive range of elastic levels, chosen by `pickElasticLevel()` from
-/// cumulative CPU consumption.
+/// cumulative CPU consumption. With `kPriorityLevels == 2` there is exactly one
+/// elastic band (level 1), so this range collapses to [1, 1].
 inline constexpr Priority::Value kMinElasticLevel = 1;
 inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>(MultiLevelFeedbackQueue::kPriorityLevels) - 1;
 
@@ -30,19 +31,12 @@ inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>
 /// of thresholds. The last threshold is `MAX` so the highest band catches every
 /// long-running query.
 ///
-/// Exponential bands with base 64 ms and growth factor 2: a query stays in
-/// level 1 for up to 64 ms of accumulated CPU, level 2 up to 128 ms, doubling
-/// each step, falling to the lowest priority once it has accumulated more than
-/// ~4 s of CPU. These are starting defaults; tune as needed.
+/// MLFQ is currently configured as FIFO + Inelastic First, so there is a single
+/// elastic band whose threshold is the catch-all `MAX`. Adding more thresholds
+/// here (and bumping `MultiLevelFeedbackQueue::kPriorityLevels` accordingly) is
+/// all that's needed to reintroduce additional elastic levels.
 inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels - 1> kElasticBandThresholdsNs = {
-    static_cast<ResourceCost>(4'096'000'000),      /// L3: <  256 ms
-    static_cast<ResourceCost>(32'384'000'000),      /// L4: <  512 ms
-    static_cast<ResourceCost>(256'536'000'000),      /// L4: <  512 ms
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L1: catch-all (single elastic band)
 };
 
 static_assert(kElasticBandThresholdsNs.size() == static_cast<size_t>(kMaxElasticLevel - kMinElasticLevel + 1),
