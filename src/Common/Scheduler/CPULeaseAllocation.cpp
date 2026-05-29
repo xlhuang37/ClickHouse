@@ -647,12 +647,12 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     /// `requested_ns` (cumulative consumed + outstanding granted quantum budget), so if
     /// additional elastic bands are reintroduced later, queries that have used less CPU
     /// will land in higher (lower-index) bands without further changes here.
-    static constexpr size_t kSmallQueryCapThreshold = 2;
+    // static constexpr size_t kSmallQueryCapThreshold = 2;
     Priority priority{};
-    if (cap <= kSmallQueryCapThreshold)
-        priority.value = 0; /// MLFQ inelastic level
-    else
-        priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
+    // if (cap <= kSmallQueryCapThreshold)
+    //     priority.value = 0; /// MLFQ inelastic level
+    // else
+    priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
