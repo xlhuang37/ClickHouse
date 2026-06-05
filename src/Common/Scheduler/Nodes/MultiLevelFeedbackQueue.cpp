@@ -42,7 +42,6 @@ inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLeve
     std::numeric_limits<ResourceCost>::max(),    /// L4: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L5: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L6: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L7: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
 };
 
