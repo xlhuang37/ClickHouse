@@ -26,9 +26,9 @@ inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>
 /// priority level (`kPriorityLevels` entries). The last threshold is `MAX` so
 /// the lowest-priority band catches every long-running query.
 inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels> kElasticBandThresholdsNs = {
-    static_cast<ResourceCost>(4'096'000'000),    /// L0: <    4 s
-    static_cast<ResourceCost>(32'384'000'000),   /// L1: <   32 s
-    static_cast<ResourceCost>(256'536'000'000),  /// L2: <  256 s
+    static_cast<ResourceCost>(6'296'000'000),    /// L0: <    4 s
+    static_cast<ResourceCost>(25'004'000'000),   /// L1: <   32 s
+    std::numeric_limits<ResourceCost>::max(),    /// L3: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L3: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L4: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L5: catch-all
