@@ -1292,6 +1292,7 @@ The server successfully detected this situation and will download merged part fr
     M(ConcurrencyControlPreemptions, "Total number of CPU preemptions", ValueType::Number) \
     M(ConcurrencyControlUpscales, "Total number of CPU upscaling events", ValueType::Number) \
     M(ConcurrencyControlDownscales, "Total number of CPU downscaling events", ValueType::Number) \
+    M(ConcurrencyControlLeaseConsumedNanoseconds, "Total CPU lease consumption accounted by CPULeaseAllocation for a query.", ValueType::Nanoseconds) \
     \
     M(ConcurrentQuerySlotsAcquired, "Total number of query slots acquired", ValueType::Number) \
     M(ConcurrentQueryWaitMicroseconds, "Total time a query was waiting for a query slots", ValueType::Microseconds) \
