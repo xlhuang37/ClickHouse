@@ -219,6 +219,16 @@ private:
     /// Accounts consumed resource
     void consume(std::unique_lock<std::mutex> & lock, ResourceCost delta_ns);
 
+    /// Upper bound on in-flight CPU slot requests for the current state. Clamps `max_threads`
+    /// by the pipeline's ready-task count (when available) to avoid over-provisioning quanta.
+    size_t computeCap() const;
+
+    /// Compute the MLFQ priority (level) for the next/pending request given the current
+    /// parallelism (`allocated`) and cumulative CPU consumption (`requested_ns`).
+    /// Implements parallelism leveling: a query with fewer allocated slots sits in a lower
+    /// (higher-priority) layer, with CPU consumption choosing the sub-band within the layer.
+    Priority computeRequestPriority(size_t cap) const;
+
     /// Enqueue a resource request to the scheduler if necessary.
     /// Returns true if request is enqueued, false if it is noncompeting and should be granted immediately.
     bool schedule(std::unique_lock<std::mutex> & lock);
@@ -306,6 +316,7 @@ private:
         void finish();
         void granted();
         EnqueueResult enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority, bool throttle_non_master);
+        void reprioritize(Priority priority);
         void cancel(std::unique_lock<std::mutex> & lock);
         void scheduled();
         ResourceCost getMaxConsumed() const { return tail->max_consumed; }

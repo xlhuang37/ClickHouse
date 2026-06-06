@@ -41,7 +41,8 @@ namespace ErrorCodes
  * `value` is the bucket index. Any out-of-range value is clamped into [0, kPriorityLevels-1].
  *
  * Mapping a query's cumulative CPU consumption (consumed + granted, i.e.
- * `CPULeaseAllocation::requested_ns`) to a band is done by `pickElasticLevel()` (see .cpp).
+ * `CPULeaseAllocation::requested_ns`) to a CPU band within a layer is done by `pickCpuBand`
+ * (see .cpp); the parallelism layer offset is added by `CPULeaseAllocation`.
  *
  * Dequeue scans levels 0..K-1 in order and pops the FIFO front of the first non-empty
  * bucket. Cancel is O(1) via a `request -> bucket_index` reverse map.
@@ -53,9 +54,18 @@ namespace ErrorCodes
 class MultiLevelFeedbackQueue final : public ISchedulerPriorityQueue
 {
 public:
+    /// Parallelism leveling knobs. The elastic levels are partitioned into `kNumLayers`
+    /// contiguous "layers", each `kLayerWidth` levels wide. A query's layer is chosen by its
+    /// current parallelism (allocated slots), and the sub-level within a layer is chosen by
+    /// cumulative CPU consumption. A query in a lower layer (less parallelism) always outranks
+    /// a query in a higher layer, regardless of CPU age. Kept in the header so
+    /// `CPULeaseAllocation` can reason about valid level indices.
+    static constexpr size_t kLayerWidth = 4; /// Number of priority levels per parallelism layer.
+    static constexpr size_t kNumLayers = 2; /// Number of parallelism layers.
+
     /// Number of priority levels. Level 0 = highest (inelastic); level K-1 = lowest.
-    /// Kept in the header so `CPULeaseAllocation` can reason about valid level indices.
-    static constexpr size_t kPriorityLevels = 9;
+    /// Derived from the leveling knobs: one reserved inelastic level plus `kNumLayers` layers.
+    static constexpr size_t kPriorityLevels = 1 + kLayerWidth * kNumLayers;
 
     MultiLevelFeedbackQueue(EventQueue * event_queue_, const Poco::Util::AbstractConfiguration & config, const String & config_prefix)
         : ISchedulerPriorityQueue(event_queue_, config, config_prefix)
@@ -90,6 +100,7 @@ public:
     void enqueueRequest(ResourceRequest * request, Priority priority) override;
     std::pair<ResourceRequest *, bool> dequeueRequest() override;
     bool cancelRequest(ResourceRequest * request) override;
+    bool reprioritizeRequest(ResourceRequest * request, Priority priority) override;
     void purgeQueue() override;
 
     bool isActive() override
@@ -132,10 +143,10 @@ public:
     }
 
     /// Map a cumulative CPU consumption value (in nanoseconds; we use
-    /// `CPULeaseAllocation::requested_ns` = consumed + granted) to an elastic band
-    /// in the range [1, kPriorityLevels - 1]. Level 0 is reserved for inelastic
-    /// traffic and is never returned by this helper.
-    static Priority::Value pickElasticLevel(ResourceCost cumulative_cpu_ns);
+    /// `CPULeaseAllocation::requested_ns` = consumed + granted) to a CPU band, i.e. a
+    /// sub-level within a parallelism layer in the range [0, kLayerWidth - 1]. The caller
+    /// adds the layer offset and the inelastic reservation to obtain an absolute level.
+    static Priority::Value pickCpuBand(ResourceCost cumulative_cpu_ns);
 
 private:
     std::mutex mutex;
