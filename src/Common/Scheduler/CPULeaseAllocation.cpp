@@ -659,7 +659,7 @@ Priority CPULeaseAllocation::computeRequestPriority(size_t cap) const
 {
     /// Number of allocated slots that fit in one parallelism layer. A query gets `kLevelingThreads`
     /// slots at top priority (layer 0), the next `kLevelingThreads` at the next layer, and so on.
-    static constexpr size_t kLevelingThreads = 4;
+    static constexpr size_t kLevelingThreads = 8;
     /// Small queries (computed cap <= threshold) are "inelastic" and receive strict / absolute
     /// priority via the reserved level 0 so a handful of quanta can drain ahead of any larger query.
     static constexpr size_t kSmallQueryCapThreshold = 2;
