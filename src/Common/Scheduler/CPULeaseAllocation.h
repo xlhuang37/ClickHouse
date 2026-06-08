@@ -17,6 +17,7 @@
 #include <mutex>
 #include <chrono>
 #include <functional>
+#include <optional>
 
 namespace DB
 {
@@ -228,8 +229,13 @@ private:
     size_t computeCap() const;
 
     /// Small queries with `cap <= kSmallQueryCapThreshold` are "inelastic": they receive strict
-    /// (level 0) scheduling priority, and their master thread is eligible for real-time scheduling.
+    /// (level 0) scheduling priority, and one of their threads is eligible for real-time scheduling.
     static constexpr size_t kSmallQueryCapThreshold = 2;
+
+    /// A query must stay in the inelastic phase for at least this long (wall-clock) before any of its
+    /// threads may transition to real-time scheduling. This filters out the transient inelastic
+    /// blips that even elastic queries experience, so only genuinely inelastic phases are accelerated.
+    static constexpr ResourceCost kRealtimeInelasticThresholdNs = 1'000'000; /// 1 ms
 
     /// Whether the query is currently in its inelastic phase. Must be called under `mutex`.
     bool isInelasticLocked() const { return computeCap() <= kSmallQueryCapThreshold; }
@@ -244,12 +250,14 @@ private:
     /// Returns true if request is enqueued, false if it is noncompeting and should be granted immediately.
     bool schedule(std::unique_lock<std::mutex> & lock);
 
-    /// Real-time scheduling for the master thread of an inelastic query. Must run ON the master
-    /// OS thread (it switches the calling thread's scheduling policy) with `mutex` held.
-    /// Acquires/releases a slot from the global RealTimeSlotPool and toggles SCHED_FIFO so that
-    /// an inelastic master can monopolize a CPU core.
-    void updateMasterRealtime(bool inelastic);
-    void disableMasterRealtime(); /// Unconditionally leave real-time state (must run on the master thread).
+    /// Real-time scheduling for one thread of an inelastic query. Both helpers must run ON the
+    /// thread identified by `slot_id` (they switch the calling thread's scheduling policy) with
+    /// `mutex` held. At most one thread per query may be real-time at a time.
+    /// `tryEnableRealtime` acquires a global RealTimeSlotPool slot and switches to SCHED_FIFO;
+    /// `disableRealtime` reverts to SCHED_OTHER and returns the slot (no-op unless `slot_id` is the
+    /// current real-time thread).
+    void tryEnableRealtime(size_t slot_id);
+    void disableRealtime(size_t slot_id);
 
     /// Thread stops and completely releases its lease.
     void release(Lease & lease);
@@ -303,10 +311,12 @@ private:
     ResourceCost consumed_ns = 0; /// Real consumption accumulated from renew() calls
     ResourceCost requested_ns = 0; /// Consumption requested from the scheduler (requested <= consumed + quantum)
 
-    /// Real-time scheduling state for the master thread (slot 0). Guarded by `mutex`.
-    bool master_realtime_active = false; /// True while the master thread holds an RT slot and runs SCHED_FIFO
-    bool master_realtime_disabled = false; /// Latched true if enabling RT failed (e.g. no CAP_SYS_NICE), to stop retrying
-    ResourceCost last_realtime_check_ns = 0; /// Master thread CPU time of the last inelasticity check (throttling)
+    /// Real-time scheduling state for the query. Guarded by `mutex`.
+    /// `slot_id` of the thread currently running SCHED_FIFO (holding an RT slot), or empty if none.
+    /// At most one thread per query is real-time at a time.
+    std::optional<size_t> realtime_slot_id;
+    bool realtime_disabled = false; /// Latched true if enabling RT failed (e.g. no CAP_SYS_NICE), to stop retrying
+    ResourceCost inelastic_since_ns = -1; /// CLOCK_MONOTONIC time the current inelastic phase began, or -1 if elastic
 
     /// Scheduling control (for interaction with resource scheduler)
     /// A size-limited cyclic buffer of requests that are sent to the scheduler.
