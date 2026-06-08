@@ -71,10 +71,14 @@ public:
     /// Returns false if the slot is released and holder should stop using it (e.g. thread should be stopped).
     virtual bool renew() = 0;
 
-    /// Give up any privileged (e.g. real-time) scheduling state held by the calling thread, so that
-    /// another thread of the same allocation may take it over. Intended to be called by a thread that
-    /// is about to go idle (e.g. blocking while waiting for a task). Must run on the thread that owns
-    /// the lease. The default implementation is a no-op for allocations without such state.
+    /// Whether the calling thread currently runs under privileged (real-time) scheduling. Cheap and
+    /// lock-free; intended as a hint for the executor to decide whether to bound an idle wait.
+    /// The default implementation returns false for allocations without such state.
+    virtual bool isRealtime() const { return false; }
+
+    /// Give up the calling thread's privileged (real-time) scheduling state, e.g. when it has been idle
+    /// (no task) for too long, so the scarce real-time reservation is not held during a non-transient
+    /// stall. Must run on the thread that owns the lease. The default implementation is a no-op.
     virtual void relinquishRealtime() {}
 };
 

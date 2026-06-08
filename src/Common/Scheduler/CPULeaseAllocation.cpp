@@ -268,12 +268,14 @@ void CPULeaseAllocation::free()
     acquirable.store(false, std::memory_order_relaxed);
     wait_timer.reset();
 
-    // Return the process-wide RT permit (if held) to the pool. Any thread still running SCHED_FIFO
-    // will revert to the default policy itself on its next renew() (which observes `shutdown`).
-    if (realtime_permits > 0)
+    // Return the process-wide RT permit (if held) to the pool and leave real-time mode. The master
+    // thread still running SCHED_FIFO reverts to the default policy itself on its next renew() (which
+    // observes `shutdown`); we do not touch its OS policy here because it must be done on that thread.
+    realtime_mode = false;
+    if (realtime_permit_held)
     {
         RealTimeSlotPool::instance().release();
-        realtime_permits = 0;
+        realtime_permit_held = false;
     }
 
     // Wake up all preempted threads
@@ -511,21 +513,18 @@ bool CPULeaseAllocation::renew(Lease & lease)
     if (exception)
         throw Exception(ErrorCodes::RESOURCE_ACCESS_DENIED, "CPU Resource request failed: {}", getExceptionMessage(exception, /* with_stacktrace = */ false));
 
-    // Real-time scheduling for inelastic queries. The query holds a process-wide RT permit
-    // (`realtime_permits`); any thread may consume a free local permit to monopolize a core and
-    // returns it when it goes idle or the query stops being inelastic. renew() runs on the calling
-    // thread's own OS thread, so SCHED_FIFO can be toggled on `self`.
+    // Real-time acceleration for inelastic queries: the master thread (slot 0) runs the bottleneck
+    // alone under SCHED_FIFO while workers downscale. renew() runs on the calling thread's own OS
+    // thread, so SCHED_FIFO can be toggled on `self`.
     const bool inelastic = isInelasticLocked();
 
-    // First, handle a thread that is already real-time. It runs "for free": its CPU time (delta_ns)
-    // is discarded (not added to consumed_ns/requested_ns, no effect on MLFQ banding) and it is never
-    // preempted. It gives up real-time (returning its local permit) on shutdown or once the query is
-    // no longer inelastic.
-    if (lease.is_realtime)
+    if (lease.is_realtime.load(std::memory_order_relaxed))
     {
+        // This is the master thread while it is real-time. It runs "for free": its CPU time (delta_ns)
+        // is discarded (not accounted, no MLFQ banding) and it is never preempted.
         if (shutdown)
         {
-            disableRealtimeForSelf(lease);
+            disableRealtimeOnSelf(lease); // permit already returned by free()
             downscale(lease.slot_id, /* shutdown = */ true);
             lease.reset();
             return false;
@@ -535,31 +534,33 @@ bool CPULeaseAllocation::renew(Lease & lease)
             report_span.reset();
             return true;
         }
-        disableRealtimeForSelf(lease); // Query became elastic: fall through to normal accounting.
+        exitRealtimeMode(lock, lease); // Query became elastic: revert and fall through to normal accounting.
     }
-
-    // Otherwise, decide whether this thread should become real-time. Skipped during shutdown:
-    // free() has already returned the permit and threads only revert their own policy here.
-    if (!realtime_disabled && !shutdown)
+    else if (realtime_mode && lease.slot_id != 0)
     {
-        const ResourceCost now_mono_ns = static_cast<ResourceCost>(clock_gettime_ns(CLOCK_MONOTONIC));
+        // The master is the real-time thread; this is a worker. Downscale so the master runs alone.
+        // The executor re-spawns workers once the query leaves real-time mode (see exitRealtimeMode).
+        // `acquirable` is forced false so the freed slot is not immediately re-acquired during RT.
+        downscale(lease.slot_id);
+        acquirable.store(false, std::memory_order_relaxed);
+        lease.reset();
+        return false;
+    }
+    else if (!realtime_disabled && !shutdown)
+    {
+        // Not in real-time mode yet. Track the inelastic-phase start (wall-clock); only the master
+        // thread starts real-time mode, and only after the query stays inelastic long enough (which
+        // filters out transient inelastic blips of otherwise elastic queries).
         if (inelastic)
         {
-            // Track the start of the inelastic phase (wall-clock); a permit is taken only after the
-            // query stays continuously inelastic long enough, filtering out transient inelastic blips.
+            const ResourceCost now_mono_ns = static_cast<ResourceCost>(clock_gettime_ns(CLOCK_MONOTONIC));
             if (inelastic_since_ns < 0)
                 inelastic_since_ns = now_mono_ns;
 
-            // Step 1: acquire the query's process-wide permit if we have been inelastic long enough.
-            if (realtime_permits == 0 && now_mono_ns - inelastic_since_ns >= kRealtimeInelasticThresholdNs
-                && RealTimeSlotPool::instance().tryAcquire())
-                realtime_permits = 1;
-
-            // Step 2: take a free local permit and run real-time "for free" starting this renewal.
-            if (realtime_in_use < realtime_permits)
+            if (lease.slot_id == 0 && now_mono_ns - inelastic_since_ns >= kRealtimeInelasticThresholdNs)
             {
-                enableRealtimeForSelf(lease);
-                if (lease.is_realtime)
+                enterRealtimeMode(lock, lease);
+                if (lease.is_realtime.load(std::memory_order_relaxed))
                 {
                     report_span.reset();
                     return true;
@@ -567,15 +568,7 @@ bool CPULeaseAllocation::renew(Lease & lease)
             }
         }
         else
-        {
             inelastic_since_ns = -1;
-            // Hand the permit back to the pool once the query is elastic and no thread is using RT.
-            if (realtime_permits > 0 && realtime_in_use == 0)
-            {
-                RealTimeSlotPool::instance().release();
-                realtime_permits = 0;
-            }
-        }
     }
 
     consume(lock, delta_ns);
@@ -760,45 +753,69 @@ Priority CPULeaseAllocation::computeRequestPriority() const
     return priority;
 }
 
-void CPULeaseAllocation::enableRealtimeForSelf(Lease & lease)
+void CPULeaseAllocation::enterRealtimeMode(std::unique_lock<std::mutex> & lock, Lease & lease)
 {
-    // IMPORTANT: must run on the OS thread that owns `lease` (it switches the caller's policy).
-    chassert(!lease.is_realtime);
-    chassert(realtime_in_use < realtime_permits);
-    if (OSThreadRealtime::enable(settings.realtime_priority))
-    {
-        lease.is_realtime = true;
-        ++realtime_in_use;
-    }
-    else
+    // IMPORTANT: must run on the master thread (it switches the caller's scheduling policy).
+    chassert(!realtime_mode);
+    chassert(lease.slot_id == 0);
+
+    // Bound how many queries may monopolize a core at once (non-blocking).
+    if (!RealTimeSlotPool::instance().tryAcquire())
+        return; // No permit available right now; stay normal and retry on a later renew.
+
+    if (!OSThreadRealtime::enable(settings.realtime_priority))
     {
         // Could not switch to SCHED_FIFO (e.g. no CAP_SYS_NICE): stop retrying for this allocation to
-        // avoid hammering the syscall on every renew, and return the now-unusable permit to the pool.
+        // avoid hammering the syscall on every renew, and return the unusable permit to the pool.
+        RealTimeSlotPool::instance().release();
         realtime_disabled = true;
-        if (realtime_in_use == 0 && realtime_permits > 0)
-        {
-            RealTimeSlotPool::instance().release();
-            realtime_permits = 0;
-        }
+        return;
     }
+
+    realtime_mode = true;
+    realtime_permit_held = true;
+    lease.is_realtime.store(true, std::memory_order_relaxed);
+
+    // Stop the scheduler from granting more slots: cancel the pending request and prevent the
+    // executor from acquiring slots while the master runs alone. Workers downscale on their own renew.
+    requests.cancel(lock);
+    acquirable.store(false, std::memory_order_relaxed);
 }
 
-void CPULeaseAllocation::disableRealtimeForSelf(Lease & lease)
+void CPULeaseAllocation::disableRealtimeOnSelf(Lease & lease)
 {
-    // IMPORTANT: must run on the OS thread that owns `lease`.
-    chassert(lease.is_realtime);
+    // IMPORTANT: must run on the OS thread that owns `lease`. Only reverts the OS scheduling policy;
+    // permit / mode bookkeeping is handled by the caller.
+    if (!lease.is_realtime.load(std::memory_order_relaxed))
+        return;
     OSThreadRealtime::disable();
-    lease.is_realtime = false;
-    --realtime_in_use;
-    // The permit is intentionally kept: it stays held by the query so another thread may take it over.
-    // It is returned to the pool when the query becomes elastic (see renew) or is freed (see free).
+    lease.is_realtime.store(false, std::memory_order_relaxed);
+}
+
+void CPULeaseAllocation::exitRealtimeMode(std::unique_lock<std::mutex> & lock, Lease & lease)
+{
+    // IMPORTANT: must run on the master thread.
+    disableRealtimeOnSelf(lease);
+    if (realtime_permit_held)
+    {
+        RealTimeSlotPool::instance().release();
+        realtime_permit_held = false;
+    }
+    realtime_mode = false;
+    inelastic_since_ns = -1; // Require a fresh inelastic phase before re-entering real-time mode.
+
+    // Resume normal scheduling: allow the executor to re-acquire the slots freed by downscaled workers
+    // and request more if needed, so it can re-spawn worker threads as parallel work appears.
+    acquirable.store(granted > 0 && !shutdown, std::memory_order_relaxed);
+    if (!shutdown)
+        schedule(lock);
 }
 
 void CPULeaseAllocation::relinquishRealtime(Lease & lease)
 {
     std::unique_lock lock{mutex};
-    if (lease.is_realtime)
-        disableRealtimeForSelf(lease);
+    if (lease.is_realtime.load(std::memory_order_relaxed))
+        exitRealtimeMode(lock, lease);
 }
 
 bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
@@ -834,12 +851,18 @@ void CPULeaseAllocation::release(Lease & lease)
     // Report the last chunk of consumed resource
     std::unique_lock lock{mutex};
 
-    if (lease.is_realtime)
+    if (lease.is_realtime.load(std::memory_order_relaxed))
     {
-        // This thread is releasing its lease while still real-time. Revert this thread to the default
-        // policy and discard the trailing delta, since a real-time thread runs "for free". The query
-        // keeps the permit so a sibling thread may take it over.
-        disableRealtimeForSelf(lease);
+        // The master is releasing its lease while still real-time. Revert the OS policy and return the
+        // permit, and discard the trailing delta since it ran "for free". No re-scheduling here: the
+        // thread is stopping (the allocation is freed shortly after).
+        disableRealtimeOnSelf(lease);
+        if (realtime_permit_held)
+        {
+            RealTimeSlotPool::instance().release();
+            realtime_permit_held = false;
+        }
+        realtime_mode = false;
         delta_ns = 0;
     }
 

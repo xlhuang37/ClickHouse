@@ -13,6 +13,7 @@
 #include <Common/ISlotControl.h>
 #include <Common/Logger.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <chrono>
@@ -126,13 +127,16 @@ private:
         void startConsumption() override;
         bool renew() override;
         void relinquishRealtime() override;
+        bool isRealtime() const override { return is_realtime.load(std::memory_order_relaxed); }
         void reset();
 
     private:
         friend class CPULeaseAllocation;
         CPULeaseAllocationPtr parent; // Hold allocation to enforce destruction order
         UInt64 last_report_ns = 0; // Last time when the slot was renewed or started
-        bool is_realtime = false; // True iff this thread currently runs under real-time scheduling (holds a local RT permit)
+        // True iff this (the master) thread currently runs under SCHED_FIFO. Toggled only by its own
+        // thread under `mutex`, but read lock-free by the executor via isRealtime().
+        std::atomic<bool> is_realtime{false};
     };
 
     /// Represents a resource request for a cpu slot.
@@ -252,23 +256,27 @@ private:
     /// Returns true if request is enqueued, false if it is noncompeting and should be granted immediately.
     bool schedule(std::unique_lock<std::mutex> & lock);
 
-    /// Real-time scheduling for an inelastic query.
+    /// Real-time acceleration for an inelastic query.
     ///
-    /// Acquiring real-time priority is decoupled into two steps, similar to obtaining a CPU lease:
-    ///  1. The whole query holds a process-wide RT permit, taken from `RealTimeSlotPool` and counted
-    ///     locally in `realtime_permits` (it is acquired once the query stays inelastic long enough and
-    ///     released back to the pool when the query becomes elastic again or is freed).
-    ///  2. Any thread, during `renew`, may consume a free local permit (`realtime_in_use < realtime_permits`)
-    ///     and switch itself to SCHED_FIFO. When such a thread goes idle (see `relinquishRealtime`), it
-    ///     returns the local permit so another thread of the same query may take it over.
+    /// When the query stays inelastic long enough, the master thread (slot 0) switches itself to
+    /// SCHED_FIFO and runs the bottleneck alone on a dedicated core; the worker threads downscale so
+    /// nothing competes for the tasks. A process-wide `RealTimeSlotPool` permit bounds how many queries
+    /// may do this at once. The query leaves this mode when it becomes elastic again, when the master
+    /// stalls without a task past a grace period, or on shutdown.
     ///
-    /// `enableRealtimeForSelf`/`disableRealtimeForSelf` switch the calling thread's scheduling policy,
-    /// so they must run ON the thread that owns `lease`, with `mutex` held.
-    void enableRealtimeForSelf(Lease & lease);
-    void disableRealtimeForSelf(Lease & lease);
+    /// `enterRealtimeMode`/`exitRealtimeMode` switch the calling (master) thread's scheduling policy,
+    /// so they must run ON the master thread with `mutex` held (the lock is passed for request (de)queue).
+    void enterRealtimeMode(std::unique_lock<std::mutex> & lock, Lease & lease);
+    void exitRealtimeMode(std::unique_lock<std::mutex> & lock, Lease & lease);
 
-    /// Called by an idle thread (about to block) to give up its real-time status while keeping the
-    /// local permit available for a sibling thread. Acquires `mutex`; must run on the lease's thread.
+    /// Revert the calling thread's OS scheduling policy to default if it is real-time (no permit/state
+    /// bookkeeping). Used on shutdown paths where the permit is released elsewhere. Must run on the
+    /// lease's own thread with `mutex` held.
+    void disableRealtimeOnSelf(Lease & lease);
+
+    /// Called by the master thread when it has been idle (no task) past the grace period: leaves
+    /// real-time mode so the scarce RT permit is not held during a non-transient stall. Acquires
+    /// `mutex`; must run on the master thread.
     void relinquishRealtime(Lease & lease);
 
     /// Thread stops and completely releases its lease.
@@ -324,12 +332,9 @@ private:
     ResourceCost requested_ns = 0; /// Consumption requested from the scheduler (requested <= consumed + quantum)
 
     /// Real-time scheduling state for the query. Guarded by `mutex`.
-    /// `realtime_permits` is the number of process-wide RT permits this query holds from `RealTimeSlotPool`
-    /// (0 or 1 in practice). `realtime_in_use` is the number of threads currently running SCHED_FIFO; the
-    /// invariant `realtime_in_use <= realtime_permits` is maintained. A thread becomes real-time by consuming
-    /// a free local permit and stops by returning it; which specific thread is real-time is dynamic.
-    size_t realtime_permits = 0;
-    size_t realtime_in_use = 0;
+    /// In real-time mode the master thread (slot 0) runs under SCHED_FIFO alone (workers downscaled).
+    bool realtime_mode = false; /// True while the query is accelerated by the real-time master thread
+    bool realtime_permit_held = false; /// True iff this query holds one `RealTimeSlotPool` token
     bool realtime_disabled = false; /// Latched true if enabling RT failed (e.g. no CAP_SYS_NICE), to stop retrying
     ResourceCost inelastic_since_ns = -1; /// CLOCK_MONOTONIC time the current inelastic phase began, or -1 if elastic
 

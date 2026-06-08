@@ -5,8 +5,15 @@
 #include <Common/ISlotControl.h>
 #include <Common/Stopwatch.h>
 
+#include <chrono>
+
 namespace DB
 {
+
+/// How long the real-time master thread keeps its dedicated core while idle (no task) before giving up
+/// real-time scheduling. This rides out brief transient task gaps without holding the scarce real-time
+/// reservation through a genuine stall.
+static constexpr auto kRealtimeIdleGrace = std::chrono::milliseconds(1);
 
 namespace ErrorCodes
 {
@@ -18,13 +25,25 @@ namespace ErrorCodes
 
 void ExecutionThreadContext::wait(std::atomic_bool & finished)
 {
-    /// The thread is about to go idle waiting for a task. If it holds real-time scheduling, give it
-    /// up so that a busy sibling thread of the same query may take it over. It will be re-acquired
-    /// (if still warranted) on a subsequent lease renewal once this thread has work again.
-    if (slot_lease)
-        slot_lease->relinquishRealtime();
-
     std::unique_lock lock(mutex);
+
+    /// If this thread runs under real-time scheduling (the master of an inelastic query), do not block
+    /// indefinitely while holding the dedicated core: wait only for a short grace period to ride out a
+    /// transient gap. If no task arrives, relinquish real-time and fall back to a normal wait.
+    if (slot_lease && slot_lease->isRealtime())
+    {
+        if (condvar.wait_for(lock, kRealtimeIdleGrace, [&] { return finished || wake_flag; }))
+        {
+            wake_flag = false;
+            return;
+        }
+
+        /// relinquishRealtime() takes the allocation's mutex, so release this thread's mutex first to
+        /// avoid holding two locks at once (keeps a consistent lock order with renew()).
+        lock.unlock();
+        slot_lease->relinquishRealtime();
+        lock.lock();
+    }
 
     condvar.wait(lock, [&]
     {
