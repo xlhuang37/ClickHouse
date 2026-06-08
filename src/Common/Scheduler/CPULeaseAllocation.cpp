@@ -103,6 +103,12 @@ bool CPULeaseAllocation::Lease::renew()
         return false;
 }
 
+void CPULeaseAllocation::Lease::relinquishRealtime()
+{
+    if (parent)
+        parent->relinquishRealtime(*this);
+}
+
 void CPULeaseAllocation::Lease::reset()
 {
     if (parent->settings.trace_cpu_scheduling)
@@ -261,6 +267,14 @@ void CPULeaseAllocation::free()
     shutdown = true;
     acquirable.store(false, std::memory_order_relaxed);
     wait_timer.reset();
+
+    // Return the process-wide RT permit (if held) to the pool. Any thread still running SCHED_FIFO
+    // will revert to the default policy itself on its next renew() (which observes `shutdown`).
+    if (realtime_permits > 0)
+    {
+        RealTimeSlotPool::instance().release();
+        realtime_permits = 0;
+    }
 
     // Wake up all preempted threads
     while (true)
@@ -497,52 +511,71 @@ bool CPULeaseAllocation::renew(Lease & lease)
     if (exception)
         throw Exception(ErrorCodes::RESOURCE_ACCESS_DENIED, "CPU Resource request failed: {}", getExceptionMessage(exception, /* with_stacktrace = */ false));
 
-    // Real-time scheduling: any single thread of an inelastic query may monopolize a core.
-    // renew() runs on the calling thread's own OS thread, so SCHED_FIFO can be toggled on `self`.
-    if (!realtime_disabled)
-    {
-        // Maintain the per-query inelastic-phase start timestamp (wall-clock). A thread may only go
-        // real-time once the query has been continuously inelastic for `kRealtimeInelasticThresholdNs`,
-        // which filters out the transient inelastic blips of otherwise elastic queries.
-        const ResourceCost now_mono_ns = static_cast<ResourceCost>(clock_gettime_ns(CLOCK_MONOTONIC));
-        const bool inelastic = isInelasticLocked();
-        if (inelastic)
-        {
-            if (inelastic_since_ns < 0)
-                inelastic_since_ns = now_mono_ns;
-        }
-        else
-            inelastic_since_ns = -1;
+    // Real-time scheduling for inelastic queries. The query holds a process-wide RT permit
+    // (`realtime_permits`); any thread may consume a free local permit to monopolize a core and
+    // returns it when it goes idle or the query stops being inelastic. renew() runs on the calling
+    // thread's own OS thread, so SCHED_FIFO can be toggled on `self`.
+    const bool inelastic = isInelasticLocked();
 
-        const bool is_realtime_holder = realtime_slot_id.has_value() && *realtime_slot_id == lease.slot_id;
-        if (is_realtime_holder)
-        {
-            // Leave real-time as soon as the query is no longer inelastic.
-            if (!inelastic)
-                disableRealtime(lease.slot_id);
-        }
-        else if (!realtime_slot_id.has_value() && inelastic
-            && now_mono_ns - inelastic_since_ns >= kRealtimeInelasticThresholdNs)
-        {
-            // No thread currently holds RT for this query and we have been inelastic long enough.
-            tryEnableRealtime(lease.slot_id);
-        }
-    }
-
-    if (realtime_slot_id.has_value() && *realtime_slot_id == lease.slot_id)
+    // First, handle a thread that is already real-time. It runs "for free": its CPU time (delta_ns)
+    // is discarded (not added to consumed_ns/requested_ns, no effect on MLFQ banding) and it is never
+    // preempted. It gives up real-time (returning its local permit) on shutdown or once the query is
+    // no longer inelastic.
+    if (lease.is_realtime)
     {
-        // A real-time thread runs "for free": its CPU time (delta_ns) is intentionally discarded,
-        // so it is not added to consumed_ns/requested_ns and does not affect MLFQ banding; and it is
-        // never preempted. It still honors shutdown.
-        report_span.reset();
         if (shutdown)
         {
-            disableRealtime(lease.slot_id);
+            disableRealtimeForSelf(lease);
             downscale(lease.slot_id, /* shutdown = */ true);
             lease.reset();
             return false;
         }
-        return true;
+        if (inelastic)
+        {
+            report_span.reset();
+            return true;
+        }
+        disableRealtimeForSelf(lease); // Query became elastic: fall through to normal accounting.
+    }
+
+    // Otherwise, decide whether this thread should become real-time. Skipped during shutdown:
+    // free() has already returned the permit and threads only revert their own policy here.
+    if (!realtime_disabled && !shutdown)
+    {
+        const ResourceCost now_mono_ns = static_cast<ResourceCost>(clock_gettime_ns(CLOCK_MONOTONIC));
+        if (inelastic)
+        {
+            // Track the start of the inelastic phase (wall-clock); a permit is taken only after the
+            // query stays continuously inelastic long enough, filtering out transient inelastic blips.
+            if (inelastic_since_ns < 0)
+                inelastic_since_ns = now_mono_ns;
+
+            // Step 1: acquire the query's process-wide permit if we have been inelastic long enough.
+            if (realtime_permits == 0 && now_mono_ns - inelastic_since_ns >= kRealtimeInelasticThresholdNs
+                && RealTimeSlotPool::instance().tryAcquire())
+                realtime_permits = 1;
+
+            // Step 2: take a free local permit and run real-time "for free" starting this renewal.
+            if (realtime_in_use < realtime_permits)
+            {
+                enableRealtimeForSelf(lease);
+                if (lease.is_realtime)
+                {
+                    report_span.reset();
+                    return true;
+                }
+            }
+        }
+        else
+        {
+            inelastic_since_ns = -1;
+            // Hand the permit back to the pool once the query is elastic and no thread is using RT.
+            if (realtime_permits > 0 && realtime_in_use == 0)
+            {
+                RealTimeSlotPool::instance().release();
+                realtime_permits = 0;
+            }
+        }
     }
 
     consume(lock, delta_ns);
@@ -727,33 +760,45 @@ Priority CPULeaseAllocation::computeRequestPriority() const
     return priority;
 }
 
-void CPULeaseAllocation::tryEnableRealtime(size_t slot_id)
+void CPULeaseAllocation::enableRealtimeForSelf(Lease & lease)
 {
-    // IMPORTANT: must run on the OS thread identified by `slot_id` (it switches the caller's policy).
-    if (realtime_slot_id.has_value() || realtime_disabled)
-        return; // Another thread of this query is already real-time, or RT is unavailable.
-    // Non-blocking: grab a real-time slot only if one is free, otherwise keep running normally.
-    if (!RealTimeSlotPool::instance().tryAcquire())
-        return;
+    // IMPORTANT: must run on the OS thread that owns `lease` (it switches the caller's policy).
+    chassert(!lease.is_realtime);
+    chassert(realtime_in_use < realtime_permits);
     if (OSThreadRealtime::enable(settings.realtime_priority))
-        realtime_slot_id = slot_id;
+    {
+        lease.is_realtime = true;
+        ++realtime_in_use;
+    }
     else
     {
-        // Could not switch to SCHED_FIFO (e.g. no CAP_SYS_NICE): give the slot back and stop
-        // retrying for this allocation to avoid hammering the syscall on every renew.
-        RealTimeSlotPool::instance().release();
+        // Could not switch to SCHED_FIFO (e.g. no CAP_SYS_NICE): stop retrying for this allocation to
+        // avoid hammering the syscall on every renew, and return the now-unusable permit to the pool.
         realtime_disabled = true;
+        if (realtime_in_use == 0 && realtime_permits > 0)
+        {
+            RealTimeSlotPool::instance().release();
+            realtime_permits = 0;
+        }
     }
 }
 
-void CPULeaseAllocation::disableRealtime(size_t slot_id)
+void CPULeaseAllocation::disableRealtimeForSelf(Lease & lease)
 {
-    // IMPORTANT: must run on the OS thread identified by `slot_id`.
-    if (!realtime_slot_id.has_value() || *realtime_slot_id != slot_id)
-        return; // This thread is not the real-time holder; nothing to do.
+    // IMPORTANT: must run on the OS thread that owns `lease`.
+    chassert(lease.is_realtime);
     OSThreadRealtime::disable();
-    RealTimeSlotPool::instance().release();
-    realtime_slot_id.reset();
+    lease.is_realtime = false;
+    --realtime_in_use;
+    // The permit is intentionally kept: it stays held by the query so another thread may take it over.
+    // It is returned to the pool when the query becomes elastic (see renew) or is freed (see free).
+}
+
+void CPULeaseAllocation::relinquishRealtime(Lease & lease)
+{
+    std::unique_lock lock{mutex};
+    if (lease.is_realtime)
+        disableRealtimeForSelf(lease);
 }
 
 bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
@@ -789,11 +834,12 @@ void CPULeaseAllocation::release(Lease & lease)
     // Report the last chunk of consumed resource
     std::unique_lock lock{mutex};
 
-    if (realtime_slot_id.has_value() && *realtime_slot_id == lease.slot_id)
+    if (lease.is_realtime)
     {
-        // This thread is releasing its lease while still real-time. Leave RT state on this (the
-        // real-time) thread and discard the trailing delta, since a real-time thread runs "for free".
-        disableRealtime(lease.slot_id);
+        // This thread is releasing its lease while still real-time. Revert this thread to the default
+        // policy and discard the trailing delta, since a real-time thread runs "for free". The query
+        // keeps the permit so a sibling thread may take it over.
+        disableRealtimeForSelf(lease);
         delta_ns = 0;
     }
 

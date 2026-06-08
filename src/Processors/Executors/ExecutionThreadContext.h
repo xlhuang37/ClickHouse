@@ -7,6 +7,7 @@ namespace DB
 {
 
 class ReadProgressCallback;
+class ISlotLease;
 
 /// Context for each executing thread of PipelineExecutor.
 class ExecutionThreadContext
@@ -25,6 +26,10 @@ private:
 
     /// Callback for read progress.
     ReadProgressCallback * read_progress_callback = nullptr;
+
+    /// CPU lease of the thread that drives this context (if any). Used to relinquish real-time
+    /// scheduling when the thread is about to block waiting for a task. Not owned.
+    ISlotLease * slot_lease = nullptr;
 
 public:
 #ifndef NDEBUG
@@ -49,6 +54,9 @@ public:
 
     void wait(std::atomic_bool & finished);
     void wakeUp();
+
+    /// Associate the driving thread's CPU lease with this context (see `slot_lease`).
+    void setSlotLease(ISlotLease * lease) { slot_lease = lease; }
 
     /// Methods to access/change currently executing task.
     bool hasTask() const { return node != nullptr; }

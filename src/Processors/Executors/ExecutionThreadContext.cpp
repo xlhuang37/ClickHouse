@@ -2,6 +2,7 @@
 #include <Processors/Executors/ExecutionThreadContext.h>
 #include <QueryPipeline/ReadProgressCallback.h>
 #include <Common/CurrentThread.h>
+#include <Common/ISlotControl.h>
 #include <Common/Stopwatch.h>
 
 namespace DB
@@ -17,6 +18,12 @@ namespace ErrorCodes
 
 void ExecutionThreadContext::wait(std::atomic_bool & finished)
 {
+    /// The thread is about to go idle waiting for a task. If it holds real-time scheduling, give it
+    /// up so that a busy sibling thread of the same query may take it over. It will be re-acquired
+    /// (if still warranted) on a subsequent lease renewal once this thread has work again.
+    if (slot_lease)
+        slot_lease->relinquishRealtime();
+
     std::unique_lock lock(mutex);
 
     condvar.wait(lock, [&]

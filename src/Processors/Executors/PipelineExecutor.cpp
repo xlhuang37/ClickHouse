@@ -338,6 +338,12 @@ void PipelineExecutor::executeStepImpl(size_t thread_num, IAcquiredSlot * cpu_sl
     CPUHelper cpu_helper(cpu_slot);
 
     auto & context = tasks.getThreadContext(thread_num);
+
+    /// Let the context relinquish this thread's real-time scheduling (if any) while it waits for a
+    /// task, so a sibling thread of the same query can take it over. Cleared before returning.
+    context.setSlotLease(cpu_helper.lease);
+    SCOPE_EXIT({ context.setSlotLease(nullptr); });
+
     bool yield = false;
 
     while (!tasks.isFinished() && !yield)

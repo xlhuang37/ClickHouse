@@ -70,6 +70,12 @@ public:
     /// Returns true if the slot is still acquired (possibly after a preemption period).
     /// Returns false if the slot is released and holder should stop using it (e.g. thread should be stopped).
     virtual bool renew() = 0;
+
+    /// Give up any privileged (e.g. real-time) scheduling state held by the calling thread, so that
+    /// another thread of the same allocation may take it over. Intended to be called by a thread that
+    /// is about to go idle (e.g. blocking while waiting for a task). Must run on the thread that owns
+    /// the lease. The default implementation is a no-op for allocations without such state.
+    virtual void relinquishRealtime() {}
 };
 
 using SlotLeasePtr = std::shared_ptr<ISlotLease>;
