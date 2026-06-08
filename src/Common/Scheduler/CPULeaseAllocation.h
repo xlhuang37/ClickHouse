@@ -126,6 +126,7 @@ private:
         friend class CPULeaseAllocation;
         CPULeaseAllocationPtr parent; // Hold allocation to enforce destruction order
         UInt64 last_report_ns = 0; // Last time when the slot was renewed or started
+        bool prioritized = false; // True if this thread lowered its OS nice value for an inelastic query
     };
 
     /// Represents a resource request for a cpu slot.
@@ -228,6 +229,13 @@ private:
     /// demand exceeds `kElasticEnterThreshold`. The gap between the two thresholds is a buffer
     /// zone that prevents flapping between the two modes when demand oscillates.
     void updateElasticity();
+
+    /// OS nice value applied to a thread while its query is inelastic.
+    static constexpr Int32 kInelasticNiceValue = -10;
+
+    /// Restore the calling thread's OS nice value to 0 if this thread lowered it (see renew()).
+    /// Must run on the OS thread that owns `lease`.
+    void resetThreadPriority(Lease & lease);
 
     /// Compute the MLFQ priority (level) for the next/pending request given the current
     /// parallelism (`allocated`) and cumulative CPU consumption (`requested_ns`).

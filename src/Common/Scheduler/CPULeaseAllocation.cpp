@@ -5,6 +5,7 @@
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/CurrentThread.h>
+#include <Common/OSThreadNiceValue.h>
 #include <Common/Stopwatch.h>
 #include <Common/OpenTelemetryTraceContext.h>
 #include <Common/logger_useful.h>
@@ -501,9 +502,24 @@ bool CPULeaseAllocation::renew(Lease & lease)
 
     if (shutdown) // Allocation is being destroyed, worker thread should stop
     {
+        resetThreadPriority(lease);
         downscale(lease.slot_id, /* shutdown = */ true);
         lease.reset();
         return false;
+    }
+
+    // Adjust this thread's OS nice value to follow the query's elasticity: lower it while the query
+    // is inelastic so its few threads run ahead of normal threads, and restore it once elastic.
+    updateElasticity();
+    if (inelastic && !lease.prioritized)
+    {
+        OSThreadNiceValue::set(kInelasticNiceValue);
+        lease.prioritized = true;
+    }
+    else if (!inelastic && lease.prioritized)
+    {
+        OSThreadNiceValue::set(0);
+        lease.prioritized = false;
     }
 
     // Check if we need to decrease number of running threads (i.e. `acquired`).
@@ -548,6 +564,7 @@ bool CPULeaseAllocation::renew(Lease & lease)
             {
                 // Timeout or exception or shutdown - worker thread should stop
                 // Only count as downscale if actually timed out, not just shutdown
+                resetThreadPriority(lease);
                 downscale(thread_num, /* shutdown = */ wait_succeeded);
                 lease.reset();
                 return false;
@@ -681,6 +698,15 @@ void CPULeaseAllocation::updateElasticity()
     }
 }
 
+void CPULeaseAllocation::resetThreadPriority(Lease & lease)
+{
+    if (lease.prioritized)
+    {
+        OSThreadNiceValue::set(0); // current thread
+        lease.prioritized = false;
+    }
+}
+
 Priority CPULeaseAllocation::computeRequestPriority() const
 {
     /// Number of allocated slots that fit in one parallelism layer. A query gets `kLevelingThreads`
@@ -757,6 +783,9 @@ void CPULeaseAllocation::release(Lease & lease)
         if (e.code() != ErrorCodes::INVALID_SCHEDULER_NODE)
             throw;
     }
+
+    // Restore this thread's OS nice value before it returns to the (reused) thread pool
+    resetThreadPriority(lease);
 
     // Release the slot
     downscale(lease.slot_id);
