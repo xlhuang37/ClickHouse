@@ -676,7 +676,7 @@ void CPULeaseAllocation::consume(std::unique_lock<std::mutex> & lock, ResourceCo
             // A request is already enqueued, but `allocated` just dropped. That may move the query
             // into a lower (higher-priority) parallelism layer, so re-bucket the pending request in
             // place to keep parallelism leveling correct (promotion across a layer boundary).
-            requests.reprioritize(computeRequestPriority(computeCap()));
+            requests.reprioritize(computeRequestPriority());
         }
         // NOTE: we do not finish more than one request per one report to avoid stalling the pipeline for reports larger than quantum
     }
@@ -705,21 +705,12 @@ size_t CPULeaseAllocation::computeCap() const
     return cap;
 }
 
-Priority CPULeaseAllocation::computeRequestPriority(size_t cap) const
+Priority CPULeaseAllocation::computeRequestPriority() const
 {
     /// Number of allocated slots that fit in one parallelism layer. A query gets `kLevelingThreads`
     /// slots at top priority (layer 0), the next `kLevelingThreads` at the next layer, and so on.
     static constexpr size_t kLevelingThreads = 8;
     static_assert(kLevelingThreads > 0, "kLevelingThreads must be positive to avoid division by zero");
-
-    /// `kSmallQueryCapThreshold` is a class member: small queries (cap <= threshold) are inelastic
-    /// and receive strict (level 0) priority so a handful of quanta drain ahead of any larger query.
-    Priority priority{};
-    if (cap <= kSmallQueryCapThreshold)
-    {
-        priority.value = 0; /// MLFQ inelastic level
-        return priority;
-    }
 
     /// Parallelism leveling: a query with fewer allocated slots sits in a lower (higher-priority)
     /// layer and therefore strictly outranks a query that already runs more threads. Very wide
@@ -731,7 +722,8 @@ Priority CPULeaseAllocation::computeRequestPriority(size_t cap) const
     /// The same thresholds are reused identically in every layer.
     Priority::Value band = MultiLevelFeedbackQueue::pickCpuBand(requested_ns);
 
-    priority.value = static_cast<Priority::Value>(1 + layer * MultiLevelFeedbackQueue::kLayerWidth) + band;
+    Priority priority{};
+    priority.value = static_cast<Priority::Value>(layer * MultiLevelFeedbackQueue::kLayerWidth) + band;
     return priority;
 }
 
@@ -770,7 +762,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     if (allocated == max_threads || shutdown)
         return true;
 
-    Priority priority = computeRequestPriority(cap);
+    Priority priority = computeRequestPriority();
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;

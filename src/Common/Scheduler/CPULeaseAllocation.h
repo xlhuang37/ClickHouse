@@ -228,8 +228,8 @@ private:
     /// by the pipeline's ready-task count (when available) to avoid over-provisioning quanta.
     size_t computeCap() const;
 
-    /// Small queries with `cap <= kSmallQueryCapThreshold` are "inelastic": they receive strict
-    /// (level 0) scheduling priority, and one of their threads is eligible for real-time scheduling.
+    /// Small queries with `cap <= kSmallQueryCapThreshold` are "inelastic": one of their threads
+    /// is eligible for real-time scheduling.
     static constexpr size_t kSmallQueryCapThreshold = 2;
 
     /// A query must stay in the inelastic phase for at least this long (wall-clock) before any of its
@@ -244,7 +244,7 @@ private:
     /// parallelism (`allocated`) and cumulative CPU consumption (`requested_ns`).
     /// Implements parallelism leveling: a query with fewer allocated slots sits in a lower
     /// (higher-priority) layer, with CPU consumption choosing the sub-band within the layer.
-    Priority computeRequestPriority(size_t cap) const;
+    Priority computeRequestPriority() const;
 
     /// Enqueue a resource request to the scheduler if necessary.
     /// Returns true if request is enqueued, false if it is noncompeting and should be granted immediately.
