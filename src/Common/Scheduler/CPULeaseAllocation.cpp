@@ -515,7 +515,8 @@ bool CPULeaseAllocation::renew(Lease & lease)
     // (`realtime_permits`); any thread may consume a free local permit to monopolize a core and
     // returns it when it goes idle or the query stops being inelastic. renew() runs on the calling
     // thread's own OS thread, so SCHED_FIFO can be toggled on `self`.
-    const bool inelastic = isInelasticLocked();
+    updateElasticity();
+    const bool is_inelastic = isInelasticLocked();
 
     // First, handle a thread that is already real-time. It runs "for free": its CPU time (delta_ns)
     // is discarded (not added to consumed_ns/requested_ns, no effect on MLFQ banding) and it is never
@@ -530,7 +531,7 @@ bool CPULeaseAllocation::renew(Lease & lease)
             lease.reset();
             return false;
         }
-        if (inelastic)
+        if (is_inelastic)
         {
             report_span.reset();
             return true;
@@ -543,7 +544,7 @@ bool CPULeaseAllocation::renew(Lease & lease)
     if (!realtime_disabled && !shutdown)
     {
         const ResourceCost now_mono_ns = static_cast<ResourceCost>(clock_gettime_ns(CLOCK_MONOTONIC));
-        if (inelastic)
+        if (is_inelastic)
         {
             // Track the start of the inelastic phase (wall-clock); a permit is taken only after the
             // query stays continuously inelastic long enough, filtering out transient inelastic blips.
@@ -736,6 +737,31 @@ size_t CPULeaseAllocation::computeCap() const
         cap = std::max<size_t>(std::min<size_t>(max_threads, tasks_count), 2);
     }
     return cap;
+}
+
+void CPULeaseAllocation::updateElasticity()
+{
+    /// Demand below this threshold makes a query switch to "inelastic" mode.
+    static constexpr size_t kInelasticEnterThreshold = 4; /// tasks + running < 4  -> inelastic
+    /// Demand above this threshold makes a query switch back to "elastic" mode.
+    /// The gap (4..8) is a buffer zone that keeps the current mode to avoid flapping.
+    static constexpr size_t kElasticEnterThreshold = 8; /// tasks + running > 8  -> elastic
+    static_assert(kInelasticEnterThreshold <= kElasticEnterThreshold, "Inelastic enter threshold must not exceed elastic enter threshold");
+
+    if (!settings.get_tasks_count)
+        return; // No task information available; preserve elastic behavior (cap == max_threads path)
+
+    size_t demand = settings.get_tasks_count() + threads.running_count;
+    if (inelastic)
+    {
+        if (demand > kElasticEnterThreshold)
+            inelastic = false;
+    }
+    else
+    {
+        if (demand < kInelasticEnterThreshold)
+            inelastic = true;
+    }
 }
 
 Priority CPULeaseAllocation::computeRequestPriority() const

@@ -230,17 +230,20 @@ private:
     /// by the pipeline's ready-task count (when available) to avoid over-provisioning quanta.
     size_t computeCap() const;
 
-    /// Small queries with `cap <= kSmallQueryCapThreshold` are "inelastic": one of their threads
-    /// is eligible for real-time scheduling.
-    static constexpr size_t kSmallQueryCapThreshold = 2;
+    /// Update the `inelastic` mode using hysteresis on `tasks + running_count`. A query becomes
+    /// inelastic once demand drops below `kInelasticEnterThreshold` and stays inelastic until
+    /// demand exceeds `kElasticEnterThreshold`. The gap between the two thresholds is a buffer
+    /// zone that prevents flapping between the two modes when demand oscillates. Call under `mutex`.
+    void updateElasticity();
 
     /// A query must stay in the inelastic phase for at least this long (wall-clock) before any of its
     /// threads may transition to real-time scheduling. This filters out the transient inelastic
     /// blips that even elastic queries experience, so only genuinely inelastic phases are accelerated.
     static constexpr ResourceCost kRealtimeInelasticThresholdNs = 1'000'000; /// 1 ms
 
-    /// Whether the query is currently in its inelastic phase. Must be called under `mutex`.
-    bool isInelasticLocked() const { return computeCap() <= kSmallQueryCapThreshold; }
+    /// Whether the query is currently in its inelastic phase. Reflects the hysteresis state computed
+    /// by updateElasticity(). Must be called under `mutex`.
+    bool isInelasticLocked() const { return inelastic; }
 
     /// Compute the MLFQ priority (level) for the next/pending request given the current
     /// parallelism (`allocated`) and cumulative CPU consumption (`requested_ns`).
@@ -322,6 +325,7 @@ private:
     Int64 granted = 0; /// Allocated but not acquired slots (might be negative if acquired more than allocated)
     ResourceCost consumed_ns = 0; /// Real consumption accumulated from renew() calls
     ResourceCost requested_ns = 0; /// Consumption requested from the scheduler (requested <= consumed + quantum)
+    bool inelastic = false; /// Current elasticity mode, updated with hysteresis (see updateElasticity)
 
     /// Real-time scheduling state for the query. Guarded by `mutex`.
     /// `realtime_permits` is the number of process-wide RT permits this query holds from `RealTimeSlotPool`
