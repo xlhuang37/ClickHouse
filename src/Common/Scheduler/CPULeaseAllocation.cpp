@@ -626,7 +626,8 @@ void CPULeaseAllocation::consume(std::unique_lock<std::mutex> & lock, ResourceCo
             // A request is already enqueued, but `allocated` just dropped. That may move the query
             // into a lower (higher-priority) parallelism layer, so re-bucket the pending request in
             // place to keep parallelism leveling correct (promotion across a layer boundary).
-            requests.reprioritize(computeRequestPriority(computeCap()));
+            updateElasticity();
+            requests.reprioritize(computeRequestPriority());
         }
         // NOTE: we do not finish more than one request per one report to avoid stalling the pipeline for reports larger than quantum
     }
@@ -655,18 +656,43 @@ size_t CPULeaseAllocation::computeCap() const
     return cap;
 }
 
-Priority CPULeaseAllocation::computeRequestPriority(size_t cap) const
+void CPULeaseAllocation::updateElasticity()
+{
+    /// Demand below this threshold makes a query switch to "inelastic" mode.
+    static constexpr size_t kInelasticEnterThreshold = 4; /// tasks + running < 4  -> inelastic
+    /// Demand above this threshold makes a query switch back to "elastic" mode.
+    /// The gap (4..8) is a buffer zone that keeps the current mode to avoid flapping.
+    static constexpr size_t kElasticEnterThreshold = 8; /// tasks + running > 8  -> elastic
+    static_assert(kInelasticEnterThreshold <= kElasticEnterThreshold, "Inelastic enter threshold must not exceed elastic enter threshold");
+
+    if (!settings.get_tasks_count)
+        return; // No task information available; preserve elastic behavior (cap == max_threads path)
+
+    size_t demand = settings.get_tasks_count() + threads.running_count;
+    if (inelastic)
+    {
+        if (demand > kElasticEnterThreshold)
+            inelastic = false;
+    }
+    else
+    {
+        if (demand < kInelasticEnterThreshold)
+            inelastic = true;
+    }
+}
+
+Priority CPULeaseAllocation::computeRequestPriority() const
 {
     /// Number of allocated slots that fit in one parallelism layer. A query gets `kLevelingThreads`
     /// slots at top priority (layer 0), the next `kLevelingThreads` at the next layer, and so on.
     static constexpr size_t kLevelingThreads = 8;
-    /// Small queries (computed cap <= threshold) are "inelastic" and receive strict / absolute
-    /// priority via the reserved level 0 so a handful of quanta can drain ahead of any larger query.
-    static constexpr size_t kSmallQueryCapThreshold = 2;
     static_assert(kLevelingThreads > 0, "kLevelingThreads must be positive to avoid division by zero");
 
     Priority priority{};
-    if (cap <= kSmallQueryCapThreshold)
+    /// Inelastic queries receive strict / absolute priority via the reserved level 0 so a handful
+    /// of quanta can drain ahead of any larger query. The mode is updated with hysteresis in
+    /// updateElasticity() to avoid flapping between elastic and inelastic scheduling.
+    if (inelastic)
     {
         priority.value = 0; /// MLFQ inelastic level
         return priority;
@@ -692,7 +718,8 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     if (allocated == max_threads || shutdown)
         return true;
 
-    Priority priority = computeRequestPriority(cap);
+    updateElasticity();
+    Priority priority = computeRequestPriority();
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;

@@ -223,11 +223,17 @@ private:
     /// by the pipeline's ready-task count (when available) to avoid over-provisioning quanta.
     size_t computeCap() const;
 
+    /// Update the `inelastic` mode using hysteresis on `tasks + running_count`. A query becomes
+    /// inelastic once demand drops below `kInelasticEnterThreshold` and stays inelastic until
+    /// demand exceeds `kElasticEnterThreshold`. The gap between the two thresholds is a buffer
+    /// zone that prevents flapping between the two modes when demand oscillates.
+    void updateElasticity();
+
     /// Compute the MLFQ priority (level) for the next/pending request given the current
     /// parallelism (`allocated`) and cumulative CPU consumption (`requested_ns`).
     /// Implements parallelism leveling: a query with fewer allocated slots sits in a lower
     /// (higher-priority) layer, with CPU consumption choosing the sub-band within the layer.
-    Priority computeRequestPriority(size_t cap) const;
+    Priority computeRequestPriority() const;
 
     /// Enqueue a resource request to the scheduler if necessary.
     /// Returns true if request is enqueued, false if it is noncompeting and should be granted immediately.
@@ -284,6 +290,7 @@ private:
     Int64 granted = 0; /// Allocated but not acquired slots (might be negative if acquired more than allocated)
     ResourceCost consumed_ns = 0; /// Real consumption accumulated from renew() calls
     ResourceCost requested_ns = 0; /// Consumption requested from the scheduler (requested <= consumed + quantum)
+    bool inelastic = false; /// Current elasticity mode, updated with hysteresis (see updateElasticity)
 
     /// Scheduling control (for interaction with resource scheduler)
     /// A size-limited cyclic buffer of requests that are sent to the scheduler.
