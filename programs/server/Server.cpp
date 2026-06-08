@@ -45,6 +45,7 @@
 #include <Common/getNumberOfCPUCoresToUse.h>
 #include <Common/getExecutablePath.h>
 #include <Common/ProfileEvents.h>
+#include <Common/RealTimeSlotPool.h>
 #include <Common/Scheduler/IResourceManager.h>
 #include <Common/ThreadProfileEvents.h>
 #include <Common/ThreadStatus.h>
@@ -349,6 +350,8 @@ namespace ServerSetting
     extern const ServerSettingsBool cpu_slot_preemption;
     extern const ServerSettingsUInt64 cpu_slot_quantum_ns;
     extern const ServerSettingsUInt64 cpu_slot_preemption_timeout_ms;
+    extern const ServerSettingsUInt64 max_realtime_threads;
+    extern const ServerSettingsUInt64 realtime_thread_priority;
     extern const ServerSettingsString uncompressed_cache_policy;
     extern const ServerSettingsUInt64 uncompressed_cache_size;
     extern const ServerSettingsDouble uncompressed_cache_size_ratio;
@@ -2400,6 +2403,8 @@ try
                 new_server_settings[ServerSetting::cpu_slot_preemption],
                 new_server_settings[ServerSetting::cpu_slot_quantum_ns],
                 new_server_settings[ServerSetting::cpu_slot_preemption_timeout_ms]);
+            RealTimeSlotPool::instance().setMaxSlots(new_server_settings[ServerSetting::max_realtime_threads]);
+            global_context->setRealtimeThreadPriority(new_server_settings[ServerSetting::realtime_thread_priority]);
 
             if (config().has("resources"))
             {

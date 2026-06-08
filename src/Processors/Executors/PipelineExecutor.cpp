@@ -501,6 +501,7 @@ SlotAllocationPtr PipelineExecutor::allocateCPU(size_t num_threads, bool concurr
                             .get_tasks_count = [this]() { return tasks.getTasksCount(); },
                             .workload = query_context->getSettingsRef()[Setting::workload],
                             .trace_cpu_scheduling = trace_cpu_scheduling,
+                            .realtime_priority = static_cast<int>(query_context->getRealtimeThreadPriority()),
                         });
                 }
                 else

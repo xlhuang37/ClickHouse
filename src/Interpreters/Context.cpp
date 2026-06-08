@@ -532,6 +532,7 @@ struct ContextSharedPart : boost::noncopyable
     bool cpu_slot_preemption TSA_GUARDED_BY(mutex) = false;
     UInt64 cpu_slot_quantum_ns TSA_GUARDED_BY(mutex) = 10'000'000;
     UInt64 cpu_slot_preemption_timeout_ms TSA_GUARDED_BY(mutex) = 1000;
+    UInt64 realtime_thread_priority TSA_GUARDED_BY(mutex) = 1;
     UInt64 concurrent_threads_soft_limit_num TSA_GUARDED_BY(mutex) = 0;
     UInt64 concurrent_threads_soft_limit_ratio_to_cores TSA_GUARDED_BY(mutex) = 0;
     String concurrent_threads_scheduler TSA_GUARDED_BY(mutex);
@@ -2311,6 +2312,18 @@ void Context::setCPUSlotPreemption(bool cpu_slot_preemption, UInt64 cpu_slot_qua
     shared->cpu_slot_preemption = cpu_slot_preemption;
     shared->cpu_slot_quantum_ns = cpu_slot_quantum_ns;
     shared->cpu_slot_preemption_timeout_ms = cpu_slot_preemption_timeout_ms;
+}
+
+UInt64 Context::getRealtimeThreadPriority() const
+{
+    SharedLockGuard lock(shared->mutex);
+    return shared->realtime_thread_priority;
+}
+
+void Context::setRealtimeThreadPriority(UInt64 realtime_thread_priority)
+{
+    std::lock_guard lock(shared->mutex);
+    shared->realtime_thread_priority = realtime_thread_priority;
 }
 
 UInt64 Context::getConcurrentThreadsSoftLimitNum() const

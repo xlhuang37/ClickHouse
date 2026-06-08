@@ -58,6 +58,10 @@ struct CPULeaseSettings
 
     /// Enable OpenTelemetry tracing for CPU scheduling
     bool trace_cpu_scheduling = false;
+
+    /// `SCHED_FIFO` priority used when the master thread of an inelastic query transitions to
+    /// Linux real-time scheduling (see RealTimeSlotPool). Only used on Linux with CAP_SYS_NICE.
+    int realtime_priority = 1;
 };
 
 class CPULeaseAllocation;
@@ -223,6 +227,13 @@ private:
     /// by the pipeline's ready-task count (when available) to avoid over-provisioning quanta.
     size_t computeCap() const;
 
+    /// Small queries with `cap <= kSmallQueryCapThreshold` are "inelastic": they receive strict
+    /// (level 0) scheduling priority, and their master thread is eligible for real-time scheduling.
+    static constexpr size_t kSmallQueryCapThreshold = 2;
+
+    /// Whether the query is currently in its inelastic phase. Must be called under `mutex`.
+    bool isInelasticLocked() const { return computeCap() <= kSmallQueryCapThreshold; }
+
     /// Compute the MLFQ priority (level) for the next/pending request given the current
     /// parallelism (`allocated`) and cumulative CPU consumption (`requested_ns`).
     /// Implements parallelism leveling: a query with fewer allocated slots sits in a lower
@@ -232,6 +243,13 @@ private:
     /// Enqueue a resource request to the scheduler if necessary.
     /// Returns true if request is enqueued, false if it is noncompeting and should be granted immediately.
     bool schedule(std::unique_lock<std::mutex> & lock);
+
+    /// Real-time scheduling for the master thread of an inelastic query. Must run ON the master
+    /// OS thread (it switches the calling thread's scheduling policy) with `mutex` held.
+    /// Acquires/releases a slot from the global RealTimeSlotPool and toggles SCHED_FIFO so that
+    /// an inelastic master can monopolize a CPU core.
+    void updateMasterRealtime(bool inelastic);
+    void disableMasterRealtime(); /// Unconditionally leave real-time state (must run on the master thread).
 
     /// Thread stops and completely releases its lease.
     void release(Lease & lease);
@@ -284,6 +302,11 @@ private:
     Int64 granted = 0; /// Allocated but not acquired slots (might be negative if acquired more than allocated)
     ResourceCost consumed_ns = 0; /// Real consumption accumulated from renew() calls
     ResourceCost requested_ns = 0; /// Consumption requested from the scheduler (requested <= consumed + quantum)
+
+    /// Real-time scheduling state for the master thread (slot 0). Guarded by `mutex`.
+    bool master_realtime_active = false; /// True while the master thread holds an RT slot and runs SCHED_FIFO
+    bool master_realtime_disabled = false; /// Latched true if enabling RT failed (e.g. no CAP_SYS_NICE), to stop retrying
+    ResourceCost last_realtime_check_ns = 0; /// Master thread CPU time of the last inelasticity check (throttling)
 
     /// Scheduling control (for interaction with resource scheduler)
     /// A size-limited cyclic buffer of requests that are sent to the scheduler.

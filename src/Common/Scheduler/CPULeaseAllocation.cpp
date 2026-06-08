@@ -3,7 +3,9 @@
 #include <Common/Scheduler/ISchedulerQueue.h>
 #include <Common/Scheduler/Nodes/MultiLevelFeedbackQueue.h>
 #include <Common/Exception.h>
+#include <Common/OSThreadRealtime.h>
 #include <Common/ProfileEvents.h>
+#include <Common/RealTimeSlotPool.h>
 #include <Common/CurrentThread.h>
 #include <Common/Stopwatch.h>
 #include <Common/OpenTelemetryTraceContext.h>
@@ -495,6 +497,39 @@ bool CPULeaseAllocation::renew(Lease & lease)
     if (exception)
         throw Exception(ErrorCodes::RESOURCE_ACCESS_DENIED, "CPU Resource request failed: {}", getExceptionMessage(exception, /* with_stacktrace = */ false));
 
+    // Real-time scheduling for the master thread (slot 0). Only the master can monopolize a core,
+    // and renew() runs on the master's own OS thread, so SCHED_FIFO can be toggled on `self`.
+    const bool is_master = (lease.slot_id == 0);
+    if (is_master && !master_realtime_disabled)
+    {
+        // Re-evaluate inelasticity at most once per quantum to bound overhead; but while already
+        // real-time we must keep checking so we can detect leaving the inelastic phase (a real-time
+        // master does not consume, so schedule() would not otherwise refresh this for it).
+        const bool due = master_realtime_active
+            || (static_cast<ResourceCost>(thread_time_ns) - last_realtime_check_ns >= settings.quantum_ns);
+        if (due)
+        {
+            last_realtime_check_ns = static_cast<ResourceCost>(thread_time_ns);
+            updateMasterRealtime(isInelasticLocked());
+        }
+    }
+
+    if (is_master && master_realtime_active)
+    {
+        // A real-time master runs "for free": its CPU time (delta_ns) is intentionally discarded,
+        // so it is not added to consumed_ns/requested_ns and does not affect MLFQ banding; and it is
+        // never preempted. It still honors shutdown.
+        report_span.reset();
+        if (shutdown)
+        {
+            disableMasterRealtime();
+            downscale(lease.slot_id, /* shutdown = */ true);
+            lease.reset();
+            return false;
+        }
+        return true;
+    }
+
     consume(lock, delta_ns);
 
     report_span.reset();
@@ -660,11 +695,10 @@ Priority CPULeaseAllocation::computeRequestPriority(size_t cap) const
     /// Number of allocated slots that fit in one parallelism layer. A query gets `kLevelingThreads`
     /// slots at top priority (layer 0), the next `kLevelingThreads` at the next layer, and so on.
     static constexpr size_t kLevelingThreads = 8;
-    /// Small queries (computed cap <= threshold) are "inelastic" and receive strict / absolute
-    /// priority via the reserved level 0 so a handful of quanta can drain ahead of any larger query.
-    static constexpr size_t kSmallQueryCapThreshold = 2;
     static_assert(kLevelingThreads > 0, "kLevelingThreads must be positive to avoid division by zero");
 
+    /// `kSmallQueryCapThreshold` is a class member: small queries (cap <= threshold) are inelastic
+    /// and receive strict (level 0) priority so a handful of quanta drain ahead of any larger query.
     Priority priority{};
     if (cap <= kSmallQueryCapThreshold)
     {
@@ -684,6 +718,42 @@ Priority CPULeaseAllocation::computeRequestPriority(size_t cap) const
 
     priority.value = static_cast<Priority::Value>(1 + layer * MultiLevelFeedbackQueue::kLayerWidth) + band;
     return priority;
+}
+
+void CPULeaseAllocation::updateMasterRealtime(bool inelastic)
+{
+    // IMPORTANT: must run on the master OS thread (it switches the calling thread's policy).
+    if (inelastic)
+    {
+        if (master_realtime_active || master_realtime_disabled)
+            return;
+        // Non-blocking: grab a real-time slot only if one is free, otherwise keep running normally.
+        if (!RealTimeSlotPool::instance().tryAcquire())
+            return;
+        if (OSThreadRealtime::enable(settings.realtime_priority))
+            master_realtime_active = true;
+        else
+        {
+            // Could not switch to SCHED_FIFO (e.g. no CAP_SYS_NICE): give the slot back and stop
+            // retrying for this allocation to avoid hammering the syscall on every renew.
+            RealTimeSlotPool::instance().release();
+            master_realtime_disabled = true;
+        }
+    }
+    else
+    {
+        disableMasterRealtime();
+    }
+}
+
+void CPULeaseAllocation::disableMasterRealtime()
+{
+    // IMPORTANT: must run on the master OS thread.
+    if (!master_realtime_active)
+        return;
+    OSThreadRealtime::disable();
+    RealTimeSlotPool::instance().release();
+    master_realtime_active = false;
 }
 
 bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
@@ -718,6 +788,15 @@ void CPULeaseAllocation::release(Lease & lease)
 
     // Report the last chunk of consumed resource
     std::unique_lock lock{mutex};
+
+    if (lease.slot_id == 0 && master_realtime_active)
+    {
+        // The master thread is releasing its lease while still real-time. Leave RT state on this
+        // (master) thread and discard the trailing delta, since a real-time master runs "for free".
+        disableMasterRealtime();
+        delta_ns = 0;
+    }
+
     try
     {
         consume(lock, delta_ns);
