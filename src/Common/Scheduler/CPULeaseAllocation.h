@@ -5,7 +5,6 @@
 #include <boost/dynamic_bitset.hpp>
 #include <boost/dynamic_bitset/dynamic_bitset.hpp>
 
-#include <Common/Priority.h>
 #include <Common/Scheduler/ResourceLink.h>
 #include <Common/Scheduler/ResourceRequest.h>
 #include <Common/CurrentMetrics.h>
@@ -47,8 +46,8 @@ struct CPULeaseSettings
 
     /// Callback returning the current number of ready tasks in the owning pipeline.
     /// When set, schedule() caps the number of in-flight CPU slot requests at
-    /// min(max_threads, max(1, running_count + n / 3)) where `running_count` is the
-    /// allocator's own count of currently running (leased & non-preempted) threads.
+    /// max(min(max_threads, ready_tasks + running_count), 2) where `running_count` is the
+    /// allocator's own count of currently running (leased & non-preempted) threads (see computeCap).
     /// This prevents queries that cannot fully parallelize (e.g. behind a pipeline
     /// breaker) from over-provisioning CPU quanta.
     /// If unset, the old behavior (cap at max_threads only) is preserved.
@@ -60,7 +59,7 @@ struct CPULeaseSettings
     /// Enable OpenTelemetry tracing for CPU scheduling
     bool trace_cpu_scheduling = false;
 
-    /// `SCHED_FIFO` priority used when the master thread of an inelastic query transitions to
+    /// `SCHED_FIFO` priority used when a thread of an inelastic query transitions to
     /// Linux real-time scheduling (see RealTimeSlotPool). Only used on Linux with CAP_SYS_NICE.
     int realtime_priority = 1;
 };
@@ -228,8 +227,8 @@ private:
     /// by the pipeline's ready-task count (when available) to avoid over-provisioning quanta.
     size_t computeCap() const;
 
-    /// Small queries with `cap <= kSmallQueryCapThreshold` are "inelastic": they receive strict
-    /// (level 0) scheduling priority, and one of their threads is eligible for real-time scheduling.
+    /// Small queries with `cap <= kSmallQueryCapThreshold` are "inelastic": one of their threads is
+    /// eligible for real-time scheduling so the query's critical path can monopolize a CPU core.
     static constexpr size_t kSmallQueryCapThreshold = 2;
 
     /// A query must stay in the inelastic phase for at least this long (wall-clock) before any of its
@@ -239,12 +238,6 @@ private:
 
     /// Whether the query is currently in its inelastic phase. Must be called under `mutex`.
     bool isInelasticLocked() const { return computeCap() <= kSmallQueryCapThreshold; }
-
-    /// Compute the MLFQ priority (level) for the next/pending request given the current
-    /// parallelism (`allocated`) and cumulative CPU consumption (`requested_ns`).
-    /// Implements parallelism leveling: a query with fewer allocated slots sits in a lower
-    /// (higher-priority) layer, with CPU consumption choosing the sub-band within the layer.
-    Priority computeRequestPriority(size_t cap) const;
 
     /// Enqueue a resource request to the scheduler if necessary.
     /// Returns true if request is enqueued, false if it is noncompeting and should be granted immediately.
@@ -348,8 +341,7 @@ private:
         RequestChain(CPULeaseAllocation * lease, size_t max_threads_, ResourceLink master_link_, ResourceLink worker_link_);
         void finish();
         void granted();
-        EnqueueResult enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority, bool throttle_non_master);
-        void reprioritize(Priority priority);
+        EnqueueResult enqueue(ResourceCost cost, ResourceCost requested_ns_, bool throttle_non_master);
         void cancel(std::unique_lock<std::mutex> & lock);
         void scheduled();
         ResourceCost getMaxConsumed() const { return tail->max_consumed; }
