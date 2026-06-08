@@ -180,6 +180,20 @@ CPULeaseAllocation::RequestChain::EnqueueResult CPULeaseAllocation::RequestChain
     }
 }
 
+void CPULeaseAllocation::RequestChain::reprioritize(Priority priority)
+{
+    if (!enqueued)
+        return; // Nothing is waiting in the scheduler queue, the level will be picked at the next enqueue().
+
+    // The currently enqueued request is `&*head` (head is advanced only on grant). It lives in
+    // the master or worker queue depending on its slot kind. Move it in place to the new level.
+    auto * queue = head->is_master_slot ? master_link.queue : worker_link.queue;
+    chassert(queue);
+    auto * pqueue = dynamic_cast<ISchedulerPriorityQueue *>(queue);
+    chassert(pqueue);
+    pqueue->reprioritizeRequest(&*head, priority);
+}
+
 void CPULeaseAllocation::RequestChain::cancel(std::unique_lock<std::mutex> & lock)
 {
     if (enqueued)
@@ -607,11 +621,18 @@ void CPULeaseAllocation::consume(std::unique_lock<std::mutex> & lock, ResourceCo
             if (!schedule(lock))
                 grantImpl(lock);
         }
+        else
+        {
+            // A request is already enqueued, but `allocated` just dropped. That may move the query
+            // into a lower (higher-priority) parallelism layer, so re-bucket the pending request in
+            // place to keep parallelism leveling correct (promotion across a layer boundary).
+            requests.reprioritize(computeRequestPriority(computeCap()));
+        }
         // NOTE: we do not finish more than one request per one report to avoid stalling the pipeline for reports larger than quantum
     }
 }
 
-bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
+size_t CPULeaseAllocation::computeCap() const
 {
     /// Upper bound on in-flight CPU slot requests.
     /// The hard cap is `max_threads`. If the pipeline exposes its number of ready tasks,
@@ -631,28 +652,47 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
         size_t tasks_count = settings.get_tasks_count() + threads.running_count;
         cap = std::max<size_t>(std::min<size_t>(max_threads, tasks_count), 2);
     }
+    return cap;
+}
+
+Priority CPULeaseAllocation::computeRequestPriority(size_t cap) const
+{
+    /// Number of allocated slots that fit in one parallelism layer. A query gets `kLevelingThreads`
+    /// slots at top priority (layer 0), the next `kLevelingThreads` at the next layer, and so on.
+    static constexpr size_t kLevelingThreads = 8;
+    /// Small queries (computed cap <= threshold) are "inelastic" and receive strict / absolute
+    /// priority via the reserved level 0 so a handful of quanta can drain ahead of any larger query.
+    static constexpr size_t kSmallQueryCapThreshold = 2;
+    static_assert(kLevelingThreads > 0, "kLevelingThreads must be positive to avoid division by zero");
+
+    Priority priority{};
+    if (cap <= kSmallQueryCapThreshold)
+    {
+        priority.value = 0; /// MLFQ inelastic level
+        return priority;
+    }
+
+    /// Parallelism leveling: a query with fewer allocated slots sits in a lower (higher-priority)
+    /// layer and therefore strictly outranks a query that already runs more threads. Very wide
+    /// queries are clamped to the last layer.
+    size_t layer = std::min<size_t>(allocated / kLevelingThreads, MultiLevelFeedbackQueue::kNumLayers - 1);
+
+    /// Within a layer, the sub-band is picked from `requested_ns` (cumulative consumed + outstanding
+    /// granted quantum budget), so a query that has used less CPU sits in a higher (lower-index) band.
+    /// The same thresholds are reused identically in every layer.
+    Priority::Value band = MultiLevelFeedbackQueue::pickCpuBand(requested_ns);
+
+    priority.value = static_cast<Priority::Value>(1 + layer * MultiLevelFeedbackQueue::kLayerWidth) + band;
+    return priority;
+}
+
+bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
+{
+    size_t cap = computeCap();
     if (allocated == max_threads || shutdown)
         return true;
 
-    /// Derive request priority -- a discrete level in [0, MultiLevelFeedbackQueue::kPriorityLevels).
-    ///
-    /// Small queries (computed cap <= 4) are "inelastic" and receive strict / absolute
-    /// priority via the reserved level 0 so a handful of quanta can drain ahead of any
-    /// larger query. Since we only reach this code path when `allocated < cap`,
-    /// "has not yet reached its desired capacity" is implicit.
-    ///
-    /// Larger queries share fairly across the elastic bands [1, kPriorityLevels - 1].
-    /// The band is picked from `requested_ns` (cumulative consumed + outstanding granted
-    /// quantum budget), so a query that has used less CPU sits in a higher (lower-index)
-    /// band. Compared with the previous continuous `consumed_ns / 1024^3` priority, the
-    /// discrete bands bound the number of buckets and avoid the "same age preempt each
-    /// other" thrash when two queries have near-identical virtual time.
-    static constexpr size_t kSmallQueryCapThreshold = 2;
-    Priority priority{};
-    if (cap <= kSmallQueryCapThreshold)
-        priority.value = 0; /// MLFQ inelastic level
-    else
-        priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
+    Priority priority = computeRequestPriority(cap);
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;

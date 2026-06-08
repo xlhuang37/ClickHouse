@@ -28,6 +28,11 @@ public:
     /// Must be thread-safe.
     virtual void enqueueRequest(ResourceRequest * request, Priority priority) = 0;
 
+    /// Change the priority of an already-enqueued request in place. Lower value = higher
+    /// priority. Returns `false` and does nothing for an unknown or already-dequeued request
+    /// (same caveat as `cancelRequest`). Must be thread-safe.
+    virtual bool reprioritizeRequest(ResourceRequest * request, Priority priority) = 0;
+
     /// Final override of the legacy priority-less entry point. Existing callers keep
     /// working unchanged and their requests end up at `default_priority`.
     void enqueueRequest(ResourceRequest * request) final

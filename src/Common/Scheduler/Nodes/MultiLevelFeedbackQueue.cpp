@@ -15,55 +15,37 @@ namespace DB
 // MLFQ hardcoded configuration. All tuning knobs live in this single block.
 // ---------------------------------------------------------------------------
 
-/// Reserved priority level for inelastic / strict-priority requests
-/// (e.g. small CPU-lease queries with `cap <= kSmallQueryCapThreshold`).
-inline constexpr Priority::Value kInelasticLevel = 0;
-
-/// Inclusive range of elastic levels, chosen by `pickElasticLevel()` from
-/// cumulative CPU consumption.
-inline constexpr Priority::Value kMinElasticLevel = 1;
-inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>(MultiLevelFeedbackQueue::kPriorityLevels) - 1;
-
 /// Upper bound (exclusive) on cumulative CPU consumption (`consumed + granted`,
-/// expressed in nanoseconds) for each elastic band. There are
-/// `kMaxElasticLevel - kMinElasticLevel + 1` bands and therefore the same number
-/// of thresholds. The last threshold is `MAX` so the highest band catches every
-/// long-running query.
-///
-/// Exponential bands with base 64 ms and growth factor 2: a query stays in
-/// level 1 for up to 64 ms of accumulated CPU, level 2 up to 128 ms, doubling
-/// each step, falling to the lowest priority once it has accumulated more than
-/// ~4 s of CPU. These are starting defaults; tune as needed.
-inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels - 1> kElasticBandThresholdsNs = {
-    static_cast<ResourceCost>(6'296'000'000),    /// L0: <    4 s
-    static_cast<ResourceCost>(25'004'000'000),   /// L1: <   32 s
-    std::numeric_limits<ResourceCost>::max(),    /// L3: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L3: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L4: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L5: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L6: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
+/// expressed in nanoseconds) for each CPU band. A "band" is a sub-level within a
+/// parallelism layer; there are `kLayerWidth` bands and therefore the same number of
+/// thresholds. The same thresholds are reused identically in every layer. The last
+/// threshold is `MAX` so the lowest band catches every long-running query.
+inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kLayerWidth> kCpuBandThresholdsNs = {
+    static_cast<ResourceCost>(6'296'000'000),    /// band 0: <  ~6 s
+    static_cast<ResourceCost>(25'004'000'000),   /// band 1: < ~25 s
+    static_cast<ResourceCost>(100'016'000'000),  /// band 2: < ~100 s
+    std::numeric_limits<ResourceCost>::max(),    /// band 3: catch-all
 };
 
-static_assert(kElasticBandThresholdsNs.size() == static_cast<size_t>(kMaxElasticLevel - kMinElasticLevel + 1),
-              "Number of elastic band thresholds must match number of elastic levels");
+static_assert(kCpuBandThresholdsNs.size() == MultiLevelFeedbackQueue::kLayerWidth,
+              "Number of CPU band thresholds must match the layer width");
 
 // ---------------------------------------------------------------------------
 
-Priority::Value MultiLevelFeedbackQueue::pickElasticLevel(ResourceCost cumulative_cpu_ns)
+Priority::Value MultiLevelFeedbackQueue::pickCpuBand(ResourceCost cumulative_cpu_ns)
 {
-    /// Clamp negatives (e.g. arithmetic overflow upstream) to zero so we still hit L1.
+    /// Clamp negatives (e.g. arithmetic overflow upstream) to zero so we still hit band 0.
     if (cumulative_cpu_ns < 0)
         cumulative_cpu_ns = 0;
 
     /// Linear scan over a tiny fixed array. Cheaper than the std::map allocation it replaces,
     /// and trivially predictable for the branch predictor.
-    for (size_t i = 0; i < kElasticBandThresholdsNs.size(); ++i)
+    for (size_t i = 0; i < kCpuBandThresholdsNs.size(); ++i)
     {
-        if (cumulative_cpu_ns < kElasticBandThresholdsNs[i])
-            return kMinElasticLevel + static_cast<Priority::Value>(i);
+        if (cumulative_cpu_ns < kCpuBandThresholdsNs[i])
+            return static_cast<Priority::Value>(i);
     }
-    return kMaxElasticLevel;
+    return static_cast<Priority::Value>(MultiLevelFeedbackQueue::kLayerWidth - 1);
 }
 
 void MultiLevelFeedbackQueue::enqueueRequest(ResourceRequest * request, Priority priority)
@@ -165,6 +147,37 @@ bool MultiLevelFeedbackQueue::cancelRequest(ResourceRequest * request)
     queue_cost -= request->cost;
     canceled_requests++;
     canceled_cost += request->cost;
+    return true;
+}
+
+bool MultiLevelFeedbackQueue::reprioritizeRequest(ResourceRequest * request, Priority priority)
+{
+    std::lock_guard lock(mutex);
+    if (is_not_usable)
+        return false; /// Any request should already be failed or executed.
+
+    auto lookup = bucket_of.find(request);
+    if (lookup == bucket_of.end())
+        return false; /// Not enqueued here (e.g. already dequeued by the scheduler thread).
+
+    /// Clamp the requested level into [0, kPriorityLevels-1], mirroring enqueueRequest().
+    Priority::Value v = priority.value;
+    if (v < 0)
+        v = 0;
+    if (v > static_cast<Priority::Value>(kPriorityLevels - 1))
+        v = static_cast<Priority::Value>(kPriorityLevels - 1);
+    auto new_idx = static_cast<std::uint8_t>(v);
+
+    std::uint8_t old_idx = lookup->second;
+    if (new_idx == old_idx)
+        return true; /// Already in the right bucket, nothing to do.
+
+    /// Move the request between buckets in place. `total_size`/`queue_cost` are unchanged and
+    /// the queue is already active (it holds this request), so no (de)activation is required.
+    auto & old_bucket = buckets[old_idx];
+    old_bucket.erase(old_bucket.iterator_to(*request));
+    buckets[new_idx].push_back(*request);
+    lookup->second = new_idx;
     return true;
 }
 
