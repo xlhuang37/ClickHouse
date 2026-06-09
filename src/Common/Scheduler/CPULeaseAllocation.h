@@ -17,6 +17,7 @@
 #include <mutex>
 #include <chrono>
 #include <functional>
+#include <vector>
 
 namespace DB
 {
@@ -28,6 +29,18 @@ struct CPULeaseSettings
     static constexpr ResourceCost default_quantum_ns = 10'000'000;
     static constexpr ResourceCost default_report_ns = default_quantum_ns / 10;
     static constexpr std::chrono::milliseconds default_preemption_timeout = std::chrono::milliseconds(1000);
+
+    /// Canonical CPU band thresholds (cumulative consumption, in ns) used when the session setting
+    /// is empty or invalid. Holds `kLayerWidth - 1` finite values; the last band is the catch-all.
+    static std::vector<ResourceCost> default_demotion_thresholds_ns()
+    {
+        return {6'296'000'000, 25'004'000'000, 100'016'000'000};
+    }
+
+    /// Parse a comma-separated list of non-negative, non-decreasing nanosecond thresholds (the
+    /// `cpu_slot_demotion_thresholds_ns` session setting). Returns `default_demotion_thresholds_ns`
+    /// on an empty or malformed value.
+    static std::vector<ResourceCost> parseDemotionThresholds(const String & csv);
 
     /// Estimated cost for requests, consumption limit without renewal
     ResourceCost quantum_ns = default_quantum_ns;
@@ -55,6 +68,10 @@ struct CPULeaseSettings
 
     /// For debugging purposes, not used in production
     String workload;
+
+    /// Per-band cumulative CPU thresholds (in ns) for MLFQ demotion (the "demotion quantum" as a
+    /// session setting). Holds `kLayerWidth - 1` finite values; the last band is the catch-all.
+    std::vector<ResourceCost> demotion_thresholds_ns = default_demotion_thresholds_ns();
 
     /// Enable OpenTelemetry tracing for CPU scheduling
     bool trace_cpu_scheduling = false;

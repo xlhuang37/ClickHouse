@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 
 namespace DB
@@ -53,25 +54,40 @@ namespace ErrorCodes
 class MultiLevelFeedbackQueue final : public ISchedulerPriorityQueue
 {
 public:
-    /// Parallelism leveling knobs. The elastic levels are partitioned into `kNumLayers`
-    /// contiguous "layers", each `kLayerWidth` levels wide. A query's layer is chosen by its
-    /// current parallelism (allocated slots), and the sub-level within a layer is chosen by
-    /// cumulative CPU consumption. A query in a lower layer (less parallelism) always outranks
-    /// a query in a higher layer, regardless of CPU age. Kept in the header so
-    /// `CPULeaseAllocation` can reason about valid level indices.
-    static constexpr size_t kLayerWidth = 4; /// Number of priority levels per parallelism layer.
-    static constexpr size_t kNumLayers = 2; /// Number of parallelism layers.
+    /// Parallelism leveling topology. The elastic levels are partitioned into `num_layers`
+    /// contiguous "layers", each `layer_width` levels wide. A query's layer is chosen by its
+    /// current parallelism (allocated slots / `leveling_threads`), and the sub-level within a
+    /// layer is chosen by cumulative CPU consumption. A query in a lower layer (less parallelism)
+    /// always outranks a query in a higher layer, regardless of CPU age.
+    ///
+    /// The topology is a restart-only server setting: it is captured once at startup via
+    /// `initTopologyOnce` and is immutable afterwards. Defaults match the historical constants.
+    struct Topology
+    {
+        size_t layer_width = 4; /// Number of priority levels (CPU bands) per parallelism layer.
+        size_t num_layers = 2; /// Number of parallelism layers.
+        size_t leveling_threads = 8; /// Number of allocated slots that map to one parallelism layer.
 
-    /// Number of priority levels. Level 0 = highest; level K-1 = lowest.
-    /// Derived from the leveling knobs: `kNumLayers` layers, each `kLayerWidth` levels wide.
-    static constexpr size_t kPriorityLevels = kLayerWidth * kNumLayers;
+        /// Total number of priority levels (bucket count). Level 0 = highest.
+        size_t priorityLevels() const { return layer_width * num_layers; }
+    };
+
+    /// Returns the process-wide MLFQ topology (see `initTopologyOnce`).
+    static const Topology & topology();
+
+    /// Capture the topology from server settings. Only the first call takes effect; subsequent
+    /// calls are ignored, which makes the topology a restart-only setting. Each value is
+    /// sanitized to be at least 1.
+    static void initTopologyOnce(size_t layer_width, size_t num_layers, size_t leveling_threads);
 
     MultiLevelFeedbackQueue(EventQueue * event_queue_, const Poco::Util::AbstractConfiguration & config, const String & config_prefix)
         : ISchedulerPriorityQueue(event_queue_, config, config_prefix)
+        , buckets(topology().priorityLevels())
     {}
 
     MultiLevelFeedbackQueue(EventQueue * event_queue_, const SchedulerNodeInfo & info_)
         : ISchedulerPriorityQueue(event_queue_, info_)
+        , buckets(topology().priorityLevels())
     {}
 
     ~MultiLevelFeedbackQueue() override
@@ -143,16 +159,18 @@ public:
 
     /// Map a cumulative CPU consumption value (in nanoseconds; we use
     /// `CPULeaseAllocation::requested_ns` = consumed + granted) to a CPU band, i.e. a
-    /// sub-level within a parallelism layer in the range [0, kLayerWidth - 1]. The caller
-    /// adds the layer offset to obtain an absolute level.
-    static Priority::Value pickCpuBand(ResourceCost cumulative_cpu_ns);
+    /// sub-level within a parallelism layer in the range [0, topology().layer_width - 1].
+    /// `finite_thresholds` holds the per-band upper bounds (exclusive); the last band is an
+    /// implicit catch-all. The caller adds the layer offset to obtain an absolute level.
+    static Priority::Value pickCpuBand(ResourceCost cumulative_cpu_ns, const std::vector<ResourceCost> & finite_thresholds);
 
 private:
     std::mutex mutex;
     Int64 queue_cost = 0;
-    /// Fixed-size buckets. `buckets[0]` is highest priority.
+    /// Buckets sized to `topology().priorityLevels()` at construction (never resized afterwards,
+    /// so intrusive list heads stay stable). `buckets[0]` is highest priority.
     /// Each bucket keeps FIFO order within its priority level.
-    std::array<boost::intrusive::list<ResourceRequest>, kPriorityLevels> buckets;
+    std::vector<boost::intrusive::list<ResourceRequest>> buckets;
     /// Reverse lookup for O(1) cancel.
     std::unordered_map<ResourceRequest *, std::uint8_t> bucket_of;
     size_t total_size = 0;

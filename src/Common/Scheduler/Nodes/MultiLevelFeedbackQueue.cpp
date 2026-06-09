@@ -3,49 +3,69 @@
 #include <Common/Scheduler/Nodes/SchedulerNodeFactory.h>
 #include <Common/Exception.h>
 
+#include <algorithm>
 #include <exception>
-#include <limits>
+#include <mutex>
 #include <vector>
 
 
 namespace DB
 {
 
-// ---------------------------------------------------------------------------
-// MLFQ hardcoded configuration. All tuning knobs live in this single block.
-// ---------------------------------------------------------------------------
+namespace
+{
+    /// Process-wide MLFQ topology. Captured once at server startup (see `initTopologyOnce`) and
+    /// immutable afterwards, which makes it a restart-only setting. Defaults match the historical
+    /// hardcoded constants so tests and non-server callers behave as before.
+    MultiLevelFeedbackQueue::Topology & mutableTopology()
+    {
+        static MultiLevelFeedbackQueue::Topology instance;
+        return instance;
+    }
 
-/// Upper bound (exclusive) on cumulative CPU consumption (`consumed + granted`,
-/// expressed in nanoseconds) for each CPU band. A "band" is a sub-level within a
-/// parallelism layer; there are `kLayerWidth` bands and therefore the same number of
-/// thresholds. The same thresholds are reused identically in every layer. The last
-/// threshold is `MAX` so the lowest band catches every long-running query.
-inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kLayerWidth> kCpuBandThresholdsNs = {
-    static_cast<ResourceCost>(6'296'000'000),    /// band 0: <  ~6 s
-    static_cast<ResourceCost>(25'004'000'000),   /// band 1: < ~25 s
-    static_cast<ResourceCost>(100'016'000'000),  /// band 2: < ~100 s
-    std::numeric_limits<ResourceCost>::max(),    /// band 3: catch-all
-};
+    std::once_flag topology_init_flag;
+}
 
-static_assert(kCpuBandThresholdsNs.size() == MultiLevelFeedbackQueue::kLayerWidth,
-              "Number of CPU band thresholds must match the layer width");
+const MultiLevelFeedbackQueue::Topology & MultiLevelFeedbackQueue::topology()
+{
+    return mutableTopology();
+}
 
-// ---------------------------------------------------------------------------
+void MultiLevelFeedbackQueue::initTopologyOnce(size_t layer_width, size_t num_layers, size_t leveling_threads)
+{
+    std::call_once(topology_init_flag, [&]
+    {
+        Topology & t = mutableTopology();
+        t.layer_width = std::max<size_t>(layer_width, 1);
+        t.num_layers = std::max<size_t>(num_layers, 1);
+        t.leveling_threads = std::max<size_t>(leveling_threads, 1);
 
-Priority::Value MultiLevelFeedbackQueue::pickCpuBand(ResourceCost cumulative_cpu_ns)
+        /// Bucket indices are stored as `std::uint8_t`, so the total number of priority levels
+        /// must stay within [1, 255]. Reduce the number of layers (then the layer width) to fit.
+        static constexpr size_t kMaxPriorityLevels = 255;
+        t.layer_width = std::min<size_t>(t.layer_width, kMaxPriorityLevels);
+        if (t.layer_width * t.num_layers > kMaxPriorityLevels)
+            t.num_layers = std::max<size_t>(kMaxPriorityLevels / t.layer_width, 1);
+    });
+}
+
+Priority::Value MultiLevelFeedbackQueue::pickCpuBand(ResourceCost cumulative_cpu_ns, const std::vector<ResourceCost> & finite_thresholds)
 {
     /// Clamp negatives (e.g. arithmetic overflow upstream) to zero so we still hit band 0.
     if (cumulative_cpu_ns < 0)
         cumulative_cpu_ns = 0;
 
-    /// Linear scan over a tiny fixed array. Cheaper than the std::map allocation it replaces,
-    /// and trivially predictable for the branch predictor.
-    for (size_t i = 0; i < kCpuBandThresholdsNs.size(); ++i)
+    /// The lowest band index is the implicit catch-all for everything above the finite thresholds.
+    const size_t last_band = topology().layer_width - 1;
+
+    /// Linear scan over a tiny array. The first threshold the value falls under selects the band;
+    /// a value above every finite threshold lands in the catch-all (last) band.
+    for (size_t i = 0; i < finite_thresholds.size(); ++i)
     {
-        if (cumulative_cpu_ns < kCpuBandThresholdsNs[i])
-            return static_cast<Priority::Value>(i);
+        if (cumulative_cpu_ns < finite_thresholds[i])
+            return static_cast<Priority::Value>(std::min(i, last_band));
     }
-    return static_cast<Priority::Value>(MultiLevelFeedbackQueue::kLayerWidth - 1);
+    return static_cast<Priority::Value>(last_band);
 }
 
 void MultiLevelFeedbackQueue::enqueueRequest(ResourceRequest * request, Priority priority)
@@ -57,15 +77,15 @@ void MultiLevelFeedbackQueue::enqueueRequest(ResourceRequest * request, Priority
     if (total_size >= static_cast<size_t>(info.queue_size))
         throw Exception(ErrorCodes::SERVER_OVERLOADED, "Workload limit `max_waiting_queries` has been reached: {} of {}", total_size, info.queue_size);
 
-    /// Clamp `priority.value` into [0, kPriorityLevels-1]. Callers may legitimately pass
+    /// Clamp `priority.value` into [0, buckets.size()-1]. Callers may legitimately pass
     /// `default_priority` (value 0) or, historically, very negative / very large values:
     /// clamping keeps the queue robust to such inputs while preserving the intended
     /// "smaller value = higher priority" semantics.
     Priority::Value v = priority.value;
     if (v < 0)
         v = 0;
-    if (v > static_cast<Priority::Value>(kPriorityLevels - 1))
-        v = static_cast<Priority::Value>(kPriorityLevels - 1);
+    if (v > static_cast<Priority::Value>(buckets.size() - 1))
+        v = static_cast<Priority::Value>(buckets.size() - 1);
     auto idx = static_cast<std::uint8_t>(v);
 
     queue_cost += request->cost;
@@ -83,8 +103,8 @@ std::pair<ResourceRequest *, bool> MultiLevelFeedbackQueue::dequeueRequest()
     if (total_size == 0)
         return {nullptr, false};
 
-    /// Linear scan over a fixed-size array; lowest index == highest priority.
-    for (std::uint8_t idx = 0; idx < kPriorityLevels; ++idx)
+    /// Linear scan over the buckets; lowest index == highest priority.
+    for (size_t idx = 0; idx < buckets.size(); ++idx)
     {
         auto & bucket = buckets[idx];
         if (bucket.empty())
@@ -160,12 +180,12 @@ bool MultiLevelFeedbackQueue::reprioritizeRequest(ResourceRequest * request, Pri
     if (lookup == bucket_of.end())
         return false; /// Not enqueued here (e.g. already dequeued by the scheduler thread).
 
-    /// Clamp the requested level into [0, kPriorityLevels-1], mirroring enqueueRequest().
+    /// Clamp the requested level into [0, buckets.size()-1], mirroring enqueueRequest().
     Priority::Value v = priority.value;
     if (v < 0)
         v = 0;
-    if (v > static_cast<Priority::Value>(kPriorityLevels - 1))
-        v = static_cast<Priority::Value>(kPriorityLevels - 1);
+    if (v > static_cast<Priority::Value>(buckets.size() - 1))
+        v = static_cast<Priority::Value>(buckets.size() - 1);
     auto new_idx = static_cast<std::uint8_t>(v);
 
     std::uint8_t old_idx = lookup->second;

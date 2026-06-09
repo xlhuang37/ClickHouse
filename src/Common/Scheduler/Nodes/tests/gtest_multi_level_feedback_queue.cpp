@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <Common/Scheduler/CPULeaseAllocation.h>
 #include <Common/Scheduler/ISchedulerNode.h>
 #include <Common/Scheduler/Nodes/MultiLevelFeedbackQueue.h>
 #include <Common/Scheduler/ResourceRequest.h>
@@ -36,25 +37,51 @@ TEST(MultiLevelFeedbackQueue, PickCpuBandIsMonotonicAndClamped)
 {
     using MLFQ = MultiLevelFeedbackQueue;
 
+    /// Default finite thresholds (kLayerWidth - 1 entries; the last band is the implicit catch-all).
+    const std::vector<ResourceCost> thresholds = {6'296'000'000, 25'004'000'000, 100'016'000'000};
+    const auto last_band = static_cast<Priority::Value>(MLFQ::topology().layer_width - 1);
+
     /// Negative (e.g. arithmetic overflow upstream) and zero both map to the top band.
-    EXPECT_EQ(MLFQ::pickCpuBand(-12345), 0);
-    EXPECT_EQ(MLFQ::pickCpuBand(0), 0);
+    EXPECT_EQ(MLFQ::pickCpuBand(-12345, thresholds), 0);
+    EXPECT_EQ(MLFQ::pickCpuBand(0, thresholds), 0);
 
     /// A tiny amount of CPU stays in the top band; an enormous amount falls to the last band.
-    EXPECT_EQ(MLFQ::pickCpuBand(1), 0);
-    EXPECT_EQ(MLFQ::pickCpuBand(std::numeric_limits<ResourceCost>::max()),
-              static_cast<Priority::Value>(MLFQ::kLayerWidth - 1));
+    EXPECT_EQ(MLFQ::pickCpuBand(1, thresholds), 0);
+    EXPECT_EQ(MLFQ::pickCpuBand(std::numeric_limits<ResourceCost>::max(), thresholds), last_band);
 
-    /// Bands are non-decreasing in cumulative CPU and never leave [0, kLayerWidth-1].
+    /// Bands are non-decreasing in cumulative CPU and never leave [0, layer_width-1].
     Priority::Value prev = 0;
     for (ResourceCost cpu = 0; cpu < static_cast<ResourceCost>(300'000'000'000); cpu += static_cast<ResourceCost>(1'000'000'000))
     {
-        Priority::Value band = MLFQ::pickCpuBand(cpu);
+        Priority::Value band = MLFQ::pickCpuBand(cpu, thresholds);
         EXPECT_GE(band, 0);
-        EXPECT_LE(band, static_cast<Priority::Value>(MLFQ::kLayerWidth - 1));
+        EXPECT_LE(band, last_band);
         EXPECT_GE(band, prev);
         prev = band;
     }
+}
+
+TEST(MultiLevelFeedbackQueue, ParseDemotionThresholds)
+{
+    const auto defaults = CPULeaseSettings::default_demotion_thresholds_ns();
+
+    /// Well-formed list (with surrounding whitespace) parses verbatim.
+    EXPECT_EQ(CPULeaseSettings::parseDemotionThresholds(" 100 , 200 ,300"),
+              (std::vector<ResourceCost>{100, 200, 300}));
+
+    /// Empty and whitespace-only fall back to defaults.
+    EXPECT_EQ(CPULeaseSettings::parseDemotionThresholds(""), defaults);
+    EXPECT_EQ(CPULeaseSettings::parseDemotionThresholds("   "), defaults);
+
+    /// Malformed, negative, and non-monotonic inputs fall back to defaults.
+    EXPECT_EQ(CPULeaseSettings::parseDemotionThresholds("abc"), defaults);
+    EXPECT_EQ(CPULeaseSettings::parseDemotionThresholds("100,foo,300"), defaults);
+    EXPECT_EQ(CPULeaseSettings::parseDemotionThresholds("-5,100"), defaults);
+    EXPECT_EQ(CPULeaseSettings::parseDemotionThresholds("300,200,100"), defaults);
+
+    /// Equal consecutive values are allowed (non-decreasing).
+    EXPECT_EQ(CPULeaseSettings::parseDemotionThresholds("100,100,200"),
+              (std::vector<ResourceCost>{100, 100, 200}));
 }
 
 TEST(MultiLevelFeedbackQueue, LevelingOrdersLowerLevelFirst)
@@ -67,7 +94,7 @@ TEST(MultiLevelFeedbackQueue, LevelingOrdersLowerLevelFirst)
 
     /// Enqueue the lower-priority (higher level value) request first to prove ordering is by
     /// priority, not arrival order.
-    f.queue.enqueueRequest(&high_parallelism, Priority{static_cast<Priority::Value>(1 + MultiLevelFeedbackQueue::kLayerWidth)});
+    f.queue.enqueueRequest(&high_parallelism, Priority{static_cast<Priority::Value>(1 + MultiLevelFeedbackQueue::topology().layer_width)});
     f.queue.enqueueRequest(&low_parallelism, Priority{1});
 
     auto [first, has_more1] = f.queue.dequeueRequest();

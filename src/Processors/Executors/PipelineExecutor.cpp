@@ -41,6 +41,7 @@ namespace Setting
     extern const SettingsBool opentelemetry_trace_cpu_scheduling;
     extern const SettingsSeconds max_execution_time;
     extern const SettingsString workload;
+    extern const SettingsString cpu_slot_demotion_thresholds_ns;
 }
 
 namespace ErrorCodes
@@ -500,6 +501,8 @@ SlotAllocationPtr PipelineExecutor::allocateCPU(size_t num_threads, bool concurr
                             .on_resume = [this](size_t slot_id) { tasks.resume(slot_id); },
                             .get_tasks_count = [this]() { return tasks.getTasksCount(); },
                             .workload = query_context->getSettingsRef()[Setting::workload],
+                            .demotion_thresholds_ns = CPULeaseSettings::parseDemotionThresholds(
+                                query_context->getSettingsRef()[Setting::cpu_slot_demotion_thresholds_ns]),
                             .trace_cpu_scheduling = trace_cpu_scheduling,
                         });
                 }

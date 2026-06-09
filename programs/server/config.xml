@@ -1694,6 +1694,16 @@
     <cpu_slot_preemption_timeout_ms>1000</cpu_slot_preemption_timeout_ms>
     -->
 
+    <!-- Topology of the CPU Multi-Level Feedback Queue (MLFQ). These take effect only at server
+         startup and require a restart to change. The per-band demotion thresholds are configured
+         at runtime per session via the `cpu_slot_demotion_thresholds_ns` setting.
+    -->
+    <!--
+    <cpu_slot_mlfq_layer_width>4</cpu_slot_mlfq_layer_width>
+    <cpu_slot_mlfq_num_layers>2</cpu_slot_mlfq_num_layers>
+    <cpu_slot_mlfq_leveling_threads>8</cpu_slot_mlfq_leveling_threads>
+    -->
+
     <!-- Settings to tune cpu and memory overload warnings for system.warnings.
     <resource_overload_warnings>
         <cpu_overload_warn_ratio>0.9</cpu_overload_warn_ratio>

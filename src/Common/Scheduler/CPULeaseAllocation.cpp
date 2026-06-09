@@ -10,7 +10,11 @@
 #include <Common/logger_useful.h>
 
 #include <atomic>
+#include <cctype>
+#include <charconv>
+#include <system_error>
 #include <utility>
+#include <vector>
 
 #if 0
 #define LOG_EVENT(X) LOG_TRACE(log, "{}:{} ({}) allocated={} granted={} running={} L:{} P:{} <{}/{}> e:{}", \
@@ -56,6 +60,46 @@ namespace ErrorCodes
 {
     extern const int INVALID_SCHEDULER_NODE;
     extern const int RESOURCE_ACCESS_DENIED;
+}
+
+std::vector<ResourceCost> CPULeaseSettings::parseDemotionThresholds(const String & csv)
+{
+    std::vector<ResourceCost> result;
+    size_t pos = 0;
+    while (pos <= csv.size())
+    {
+        const size_t comma = csv.find(',', pos);
+        const size_t end = (comma == String::npos) ? csv.size() : comma;
+
+        /// Trim surrounding whitespace from the token.
+        size_t b = pos;
+        size_t e = end;
+        while (b < e && std::isspace(static_cast<unsigned char>(csv[b])))
+            ++b;
+        while (e > b && std::isspace(static_cast<unsigned char>(csv[e - 1])))
+            --e;
+
+        if (b < e)
+        {
+            Int64 value = 0;
+            const auto * first = csv.data() + b;
+            const auto * last = csv.data() + e;
+            auto [ptr, ec] = std::from_chars(first, last, value);
+            if (ec != std::errc{} || ptr != last || value < 0)
+                return CPULeaseSettings::default_demotion_thresholds_ns(); /// Malformed token.
+            if (!result.empty() && value < result.back())
+                return CPULeaseSettings::default_demotion_thresholds_ns(); /// Must be non-decreasing.
+            result.push_back(static_cast<ResourceCost>(value));
+        }
+
+        if (comma == String::npos)
+            break;
+        pos = comma + 1;
+    }
+
+    if (result.empty())
+        return CPULeaseSettings::default_demotion_thresholds_ns();
+    return result;
 }
 
 std::atomic<size_t> CPULeaseAllocation::lease_counter{0};
@@ -657,24 +701,23 @@ size_t CPULeaseAllocation::computeCap() const
 
 Priority CPULeaseAllocation::computeRequestPriority() const
 {
-    /// Number of allocated slots that fit in one parallelism layer. A query gets `kLevelingThreads`
-    /// slots at top priority (layer 0), the next `kLevelingThreads` at the next layer, and so on.
-    static constexpr size_t kLevelingThreads = 8;
-    static_assert(kLevelingThreads > 0, "kLevelingThreads must be positive to avoid division by zero");
+    /// MLFQ topology (restart-only server setting): `leveling_threads` allocated slots fit in one
+    /// parallelism layer, there are `num_layers` layers, each `layer_width` levels (CPU bands) wide.
+    const auto & topology = MultiLevelFeedbackQueue::topology();
 
     Priority priority{};
 
     /// Parallelism leveling: a query with fewer allocated slots sits in a lower (higher-priority)
     /// layer and therefore strictly outranks a query that already runs more threads. Very wide
     /// queries are clamped to the last layer.
-    size_t layer = std::min<size_t>(allocated / kLevelingThreads, MultiLevelFeedbackQueue::kNumLayers - 1);
+    size_t layer = std::min<size_t>(allocated / topology.leveling_threads, topology.num_layers - 1);
 
     /// Within a layer, the sub-band is picked from `requested_ns` (cumulative consumed + outstanding
     /// granted quantum budget), so a query that has used less CPU sits in a higher (lower-index) band.
-    /// The same thresholds are reused identically in every layer.
-    Priority::Value band = MultiLevelFeedbackQueue::pickCpuBand(requested_ns);
+    /// The per-band thresholds come from the `cpu_slot_demotion_thresholds_ns` session setting.
+    Priority::Value band = MultiLevelFeedbackQueue::pickCpuBand(requested_ns, settings.demotion_thresholds_ns);
 
-    priority.value = static_cast<Priority::Value>(layer * MultiLevelFeedbackQueue::kLayerWidth) + band;
+    priority.value = static_cast<Priority::Value>(layer * topology.layer_width) + band;
     return priority;
 }
 

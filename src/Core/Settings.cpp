@@ -6407,6 +6407,9 @@ SETTINGS additional_result_filter = 'x != 2'
     DECLARE(String, workload, "default", R"(
 Name of workload to be used to access resources
 )", 0) \
+    DECLARE(String, cpu_slot_demotion_thresholds_ns, "6296000000,25004000000,100016000000", R"(
+Comma-separated list of cumulative CPU consumption thresholds (in nanoseconds) that define the CPU bands of the Multi-Level Feedback Queue (MLFQ) used for CPU scheduling. A query is demoted to the next band once its cumulative consumed CPU time crosses the next threshold, so a query that has used less CPU keeps a higher priority. The list should hold one fewer value than `cpu_slot_mlfq_layer_width` (the last band is an implicit catch-all). Makes sense only when `cpu_slot_preemption` is enabled.
+)", 0) \
     DECLARE(Milliseconds, storage_system_stack_trace_pipe_read_timeout_ms, 100, R"(
 Maximum time to read from a pipe for receiving information from the threads when querying the `system.stack_trace` table. This setting is used for testing purposes and not meant to be changed by users.
 )", 0) \

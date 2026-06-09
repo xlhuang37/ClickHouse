@@ -99,6 +99,7 @@
 #include <Dictionaries/registerDictionaries.h>
 #include <Disks/registerDisks.h>
 #include <Common/Scheduler/Nodes/registerSchedulerNodes.h>
+#include <Common/Scheduler/Nodes/MultiLevelFeedbackQueue.h>
 #include <Common/Scheduler/Workload/IWorkloadEntityStorage.h>
 #include <Common/Config/ConfigReloader.h>
 #include <Server/HTTPHandlerFactory.h>
@@ -349,6 +350,9 @@ namespace ServerSetting
     extern const ServerSettingsBool cpu_slot_preemption;
     extern const ServerSettingsUInt64 cpu_slot_quantum_ns;
     extern const ServerSettingsUInt64 cpu_slot_preemption_timeout_ms;
+    extern const ServerSettingsUInt64 cpu_slot_mlfq_layer_width;
+    extern const ServerSettingsUInt64 cpu_slot_mlfq_num_layers;
+    extern const ServerSettingsUInt64 cpu_slot_mlfq_leveling_threads;
     extern const ServerSettingsString uncompressed_cache_policy;
     extern const ServerSettingsUInt64 uncompressed_cache_size;
     extern const ServerSettingsDouble uncompressed_cache_size_ratio;
@@ -2400,6 +2404,13 @@ try
                 new_server_settings[ServerSetting::cpu_slot_preemption],
                 new_server_settings[ServerSetting::cpu_slot_quantum_ns],
                 new_server_settings[ServerSetting::cpu_slot_preemption_timeout_ms]);
+
+            /// MLFQ topology is a restart-only setting: only the first call (at startup) takes
+            /// effect, later config reloads of these values are ignored.
+            MultiLevelFeedbackQueue::initTopologyOnce(
+                new_server_settings[ServerSetting::cpu_slot_mlfq_layer_width],
+                new_server_settings[ServerSetting::cpu_slot_mlfq_num_layers],
+                new_server_settings[ServerSetting::cpu_slot_mlfq_leveling_threads]);
 
             if (config().has("resources"))
             {
