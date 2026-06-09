@@ -35,10 +35,10 @@ namespace ErrorCodes
  *  - removes the "infinitesimal granularity" thrash where two requests with priority
  *    values one apart would constantly preempt each other.
  *
- * Level 0 is reserved for inelastic/strict-priority traffic (e.g. small CPU-lease
- * queries with `cap <= kSmallQueryCapThreshold`). Levels 1..(kPriorityLevels-1) are
- * elastic bands; the caller decides which band by passing a `Priority{value}` whose
- * `value` is the bucket index. Any out-of-range value is clamped into [0, kPriorityLevels-1].
+ * Level 0 is the first (highest-priority) level: layer 0, lowest-quantum band. Inelastic /
+ * strict-priority traffic shares this first level rather than occupying a dedicated reserved
+ * level. The caller decides which band by passing a `Priority{value}` whose `value` is the
+ * bucket index. Any out-of-range value is clamped into [0, kPriorityLevels-1].
  *
  * Mapping a query's cumulative CPU consumption (consumed + granted, i.e.
  * `CPULeaseAllocation::requested_ns`) to a CPU band within a layer is done by `pickCpuBand`
@@ -63,9 +63,10 @@ public:
     static constexpr size_t kLayerWidth = 4; /// Number of priority levels per parallelism layer.
     static constexpr size_t kNumLayers = 2; /// Number of parallelism layers.
 
-    /// Number of priority levels. Level 0 = highest (inelastic); level K-1 = lowest.
-    /// Derived from the leveling knobs: one reserved inelastic level plus `kNumLayers` layers.
-    static constexpr size_t kPriorityLevels = 1 + kLayerWidth * kNumLayers;
+    /// Number of priority levels. Level 0 = highest (layer 0, lowest band); level K-1 = lowest.
+    /// Derived from the leveling knobs: `kNumLayers` layers, each `kLayerWidth` levels wide.
+    /// Inelastic queries share the first level rather than reserving a dedicated one.
+    static constexpr size_t kPriorityLevels = kLayerWidth * kNumLayers;
 
     MultiLevelFeedbackQueue(EventQueue * event_queue_, const Poco::Util::AbstractConfiguration & config, const String & config_prefix)
         : ISchedulerPriorityQueue(event_queue_, config, config_prefix)

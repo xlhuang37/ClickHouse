@@ -715,12 +715,13 @@ Priority CPULeaseAllocation::computeRequestPriority() const
     static_assert(kLevelingThreads > 0, "kLevelingThreads must be positive to avoid division by zero");
 
     Priority priority{};
-    /// Inelastic queries receive strict / absolute priority via the reserved level 0 so a handful
-    /// of quanta can drain ahead of any larger query. The mode is updated with hysteresis in
-    /// updateElasticity() to avoid flapping between elastic and inelastic scheduling.
+    /// Inelastic queries are placed in the first level (layer 0, lowest-quantum band) rather than a
+    /// dedicated reserved level: they share the top elastic level so a handful of quanta can drain
+    /// ahead of larger queries without consuming a separate priority level. The mode is updated with
+    /// hysteresis in updateElasticity() to avoid flapping between elastic and inelastic scheduling.
     if (inelastic)
     {
-        priority.value = 0; /// MLFQ inelastic level
+        priority.value = 0; /// First level: layer 0, band 0
         return priority;
     }
 
@@ -734,7 +735,7 @@ Priority CPULeaseAllocation::computeRequestPriority() const
     /// The same thresholds are reused identically in every layer.
     Priority::Value band = MultiLevelFeedbackQueue::pickCpuBand(requested_ns);
 
-    priority.value = static_cast<Priority::Value>(1 + layer * MultiLevelFeedbackQueue::kLayerWidth) + band;
+    priority.value = static_cast<Priority::Value>(layer * MultiLevelFeedbackQueue::kLayerWidth) + band;
     return priority;
 }
 

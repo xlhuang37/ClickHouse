@@ -67,7 +67,7 @@ TEST(MultiLevelFeedbackQueue, LevelingOrdersLowerLevelFirst)
 
     /// Enqueue the lower-priority (higher level value) request first to prove ordering is by
     /// priority, not arrival order.
-    f.queue.enqueueRequest(&high_parallelism, Priority{static_cast<Priority::Value>(1 + MultiLevelFeedbackQueue::kLayerWidth)});
+    f.queue.enqueueRequest(&high_parallelism, Priority{static_cast<Priority::Value>(MultiLevelFeedbackQueue::kLayerWidth)});
     f.queue.enqueueRequest(&low_parallelism, Priority{1});
 
     auto [first, has_more1] = f.queue.dequeueRequest();
