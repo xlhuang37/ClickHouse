@@ -315,7 +315,7 @@ private:
         RequestChain(CPULeaseAllocation * lease, size_t max_threads_, ResourceLink master_link_, ResourceLink worker_link_);
         void finish();
         void granted();
-        EnqueueResult enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority, bool throttle_non_master);
+        bool enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority, bool throttle_non_master);
         void reprioritize(Priority priority);
         void cancel(std::unique_lock<std::mutex> & lock);
         void scheduled();
