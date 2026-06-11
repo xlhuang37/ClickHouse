@@ -142,18 +142,12 @@ void CPULeaseAllocation::RequestChain::granted()
         head = requests.begin();
 }
 
-CPULeaseAllocation::RequestChain::EnqueueResult CPULeaseAllocation::RequestChain::enqueue(
+bool CPULeaseAllocation::RequestChain::enqueue(
     ResourceCost cost,
     ResourceCost requested_ns_,
-    Priority priority,
-    bool throttle_non_master)
+    Priority priority)
 {
     chassert(!enqueued);
-
-    // Do not throttle the master-slot request: it must keep progressing even when
-    // worker parallelism is capped by the dynamic tasks-based limit.
-    if (throttle_non_master && !request_master_slot)
-        return EnqueueResult::Throttled;
 
     head->reset(cost);
     head->is_master_slot = std::exchange(request_master_slot, false);
@@ -171,12 +165,12 @@ CPULeaseAllocation::RequestChain::EnqueueResult CPULeaseAllocation::RequestChain
         chassert(pqueue);
         pqueue->enqueueRequest(&*head, priority);
         enqueued = true;
-        return EnqueueResult::Enqueued; // Request is enqueued to the scheduler queue, we will wait for it to be granted
+        return true; // Request is enqueued to the scheduler queue, we will wait for it to be granted
     }
     else // noncompeting slot - provide immediately for free
     {
         head->is_noncompeting = true;
-        return EnqueueResult::NonCompeting; // No need to enqueue, we will grant it immediately
+        return false;
     }
 }
 
@@ -680,24 +674,19 @@ Priority CPULeaseAllocation::computeRequestPriority() const
 
 bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 {
-    size_t cap = computeCap();
     if (allocated == max_threads || shutdown)
         return true;
 
     Priority priority = computeRequestPriority();
-
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
-    const auto enqueue_result = requests.enqueue(cost, requested_ns, priority, cap < allocated);
-    if (enqueue_result == RequestChain::EnqueueResult::Enqueued)
+    if (requests.enqueue(cost, requested_ns, priority))
     {
-        scheduled_increment.add();
-        wait_timer.emplace(wait_counters->timer(ProfileEvents::ConcurrencyControlWaitMicroseconds));
-        LOG_EVENT(E);
-        return true;
+            scheduled_increment.add();
+            wait_timer.emplace(wait_counters->timer(ProfileEvents::ConcurrencyControlWaitMicroseconds));
+            LOG_EVENT(E);
+            return true;
     }
-    if (enqueue_result == RequestChain::EnqueueResult::Throttled)
-        return true;
     return false; // Request is noncompeting and should be granted immediately
 }
 
