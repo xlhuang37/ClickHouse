@@ -25,7 +25,7 @@ namespace ErrorCodes
 }
 
 /*
- * Multi-Level Feedback Queue (MLFQ) leaf scheduler queue.
+ * Multi-Level Feedback Queue (MLFQ) leaf scheduler queue with "decay fairness".
  *
  * Unlike `PriorityQueue` (which kept an unbounded `std::map<Priority::Value, list>` and
  * therefore created a fresh bucket per distinct priority value), MLFQ keeps a fixed,
@@ -42,8 +42,15 @@ namespace ErrorCodes
  * Mapping a query's cumulative CPU consumption (consumed + granted, i.e.
  * `CPULeaseAllocation::requested_ns`) to a band is done by `pickElasticLevel()` (see .cpp).
  *
- * Dequeue scans levels 0..K-1 in order and pops the FIFO front of the first non-empty
- * bucket. Cancel is O(1) via a `request -> bucket_index` reverse map.
+ * Decay fairness (instead of absolute priority): each level carries a virtual CPU time
+ * `vtime` and a fixed `weight` (weight of level 0 is 1, later levels decay by a hardcoded
+ * ratio). Dequeue serves the non-empty level with the smallest `vtime`, then advances that
+ * level's `vtime` by `cost / weight`. Because higher-priority levels carry larger weights,
+ * their virtual time grows more slowly and they receive a proportionally larger share of
+ * CPU, while lower levels still make progress (decay, not starvation). A level that has
+ * been idle has its `vtime` lifted to the system maximum on re-activation so it cannot
+ * hoard CPU after returning (mirrors `FairPolicy`). Cancel is O(1) via a
+ * `request -> bucket_index` reverse map.
  *
  * The factory is registered under the same `"priority_queue"` name as the previous
  * `PriorityQueue` so that workload configs and `UnifiedSchedulerNode` continue to work
@@ -138,9 +145,16 @@ public:
 private:
     std::mutex mutex;
     Int64 queue_cost = 0;
-    /// Fixed-size buckets. `buckets[0]` is highest priority.
-    /// Each bucket keeps FIFO order within its priority level.
+    /// Fixed-size buckets. Each bucket keeps FIFO order within its priority level.
     std::array<boost::intrusive::list<ResourceRequest>, kPriorityLevels> buckets;
+    /// Decay-fairness virtual CPU time per level. Dequeue serves the non-empty level
+    /// with the smallest `level_vtime`, then advances it by `cost / weight`.
+    std::array<double, kPriorityLevels> level_vtime{};
+    /// Running maximum of `level_vtime`, used to lift a re-activated idle level so it
+    /// cannot hoard CPU after returning (see `FairPolicy`).
+    double max_vtime = 0;
+    /// Wall-clock of the last full reset of `level_vtime`, to bound floating-point drift.
+    UInt64 last_reset_ns = 0;
     /// Reverse lookup for O(1) cancel.
     std::unordered_map<ResourceRequest *, std::uint8_t> bucket_of;
     size_t total_size = 0;

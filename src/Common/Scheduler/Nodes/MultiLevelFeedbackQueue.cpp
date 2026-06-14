@@ -2,7 +2,9 @@
 
 #include <Common/Scheduler/Nodes/SchedulerNodeFactory.h>
 #include <Common/Exception.h>
+#include <Common/Stopwatch.h>
 
+#include <algorithm>
 #include <exception>
 #include <limits>
 #include <vector>
@@ -46,6 +48,26 @@ inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLeve
 static_assert(kElasticBandThresholdsNs.size() == static_cast<size_t>(kMaxElasticLevel - kMinElasticLevel + 1),
               "Number of elastic band thresholds must match number of elastic levels");
 
+/// Decay-fairness weights. Level 0 has weight 1; each subsequent (lower-priority)
+/// level decays by `kLevelWeightRatio`, so it receives `1 / kLevelWeightRatio` the CPU
+/// share of the level above it. A larger weight grows virtual time more slowly and thus
+/// earns a larger share. Set the ratio to 1.0 for plain fair sharing across levels; raise
+/// it to approach absolute priority.
+inline constexpr double kLevelWeightRatio = 2.0;
+
+inline constexpr std::array<double, MultiLevelFeedbackQueue::kPriorityLevels> makeLevelWeights()
+{
+    std::array<double, MultiLevelFeedbackQueue::kPriorityLevels> w{};
+    w[0] = 1.0;
+    for (size_t i = 1; i < w.size(); ++i)
+        w[i] = w[i - 1] / kLevelWeightRatio;
+    return w;
+}
+inline constexpr auto kLevelWeights = makeLevelWeights();
+
+/// Reset `level_vtime` no more than once per this interval, to bound float drift on idle.
+inline constexpr UInt64 kVTimeResetIntervalNs = 1'000'000'000;
+
 // ---------------------------------------------------------------------------
 
 Priority::Value MultiLevelFeedbackQueue::pickElasticLevel(ResourceCost cumulative_cpu_ns)
@@ -84,6 +106,12 @@ void MultiLevelFeedbackQueue::enqueueRequest(ResourceRequest * request, Priority
         v = static_cast<Priority::Value>(kPriorityLevels - 1);
     auto idx = static_cast<std::uint8_t>(v);
 
+    /// Decay fairness: when a level transitions from empty to active, lift its virtual
+    /// time to the system maximum. Otherwise a level that has been idle for a long time
+    /// would carry a stale (low) `vtime` and unfairly hoard CPU until it caught up.
+    if (buckets[idx].empty())
+        level_vtime[idx] = std::max(level_vtime[idx], max_vtime);
+
     queue_cost += request->cost;
     bool was_empty = (total_size == 0);
     buckets[idx].push_back(*request);
@@ -99,31 +127,54 @@ std::pair<ResourceRequest *, bool> MultiLevelFeedbackQueue::dequeueRequest()
     if (total_size == 0)
         return {nullptr, false};
 
-    /// Linear scan over a fixed-size array; lowest index == highest priority.
+    /// Decay fairness: serve the non-empty level with the smallest virtual time. The
+    /// linear scan (first-wins on ties) keeps the lower index as the higher-priority
+    /// tie-break, which matters at startup when all virtual times are equal to zero.
+    std::uint8_t best = kPriorityLevels;
     for (std::uint8_t idx = 0; idx < kPriorityLevels; ++idx)
     {
-        auto & bucket = buckets[idx];
-        if (bucket.empty())
+        if (buckets[idx].empty())
             continue;
-
-        ResourceRequest * result = &bucket.front();
-        bucket.pop_front();
-        bucket_of.erase(result);
-        --total_size;
-
-        if (total_size == 0)
-        {
-            busy_periods++;
-            event_queue->cancelActivation(this); /// Avoid scheduling two activations which leads to crash.
-        }
-        queue_cost -= result->cost;
-        incrementDequeued(result->cost);
-        return {result, total_size > 0};
+        if (best == kPriorityLevels || level_vtime[idx] < level_vtime[best])
+            best = idx;
     }
 
     /// Unreachable: total_size > 0 implies at least one non-empty bucket.
-    chassert(false);
-    return {nullptr, false};
+    if (best == kPriorityLevels)
+    {
+        chassert(false);
+        return {nullptr, false};
+    }
+
+    auto & bucket = buckets[best];
+    ResourceRequest * result = &bucket.front();
+    bucket.pop_front();
+    bucket_of.erase(result);
+    --total_size;
+
+    /// Advance the served level's virtual time by `cost / weight`. A larger weight grows
+    /// virtual time more slowly and therefore earns a larger share of CPU.
+    level_vtime[best] += static_cast<double>(result->cost) / kLevelWeights[best];
+    max_vtime = std::max(max_vtime, level_vtime[best]);
+
+    if (total_size == 0)
+    {
+        busy_periods++;
+        event_queue->cancelActivation(this); /// Avoid scheduling two activations which leads to crash.
+
+        /// On a fully idle queue there is no one left to be unfair to, so reset virtual
+        /// times to bound floating-point drift. Guarded by a timer to keep it cheap.
+        UInt64 ns = clock_gettime_ns();
+        if (last_reset_ns + kVTimeResetIntervalNs < ns)
+        {
+            last_reset_ns = ns;
+            level_vtime.fill(0.0);
+            max_vtime = 0;
+        }
+    }
+    queue_cost -= result->cost;
+    incrementDequeued(result->cost);
+    return {result, total_size > 0};
 }
 
 bool MultiLevelFeedbackQueue::cancelRequest(ResourceRequest * request)
