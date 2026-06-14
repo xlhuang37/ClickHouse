@@ -15,13 +15,10 @@ namespace DB
 // MLFQ hardcoded configuration. All tuning knobs live in this single block.
 // ---------------------------------------------------------------------------
 
-/// Reserved priority level for inelastic / strict-priority requests
-/// (e.g. small CPU-lease queries with `cap <= kSmallQueryCapThreshold`).
-inline constexpr Priority::Value kInelasticLevel = 0;
-
 /// Inclusive range of elastic levels, chosen by `pickElasticLevel()` from
-/// cumulative CPU consumption.
-inline constexpr Priority::Value kMinElasticLevel = 1;
+/// cumulative CPU consumption. Every level is elastic: the band is derived
+/// purely from how much CPU a query has accumulated.
+inline constexpr Priority::Value kMinElasticLevel = 0;
 inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>(MultiLevelFeedbackQueue::kPriorityLevels) - 1;
 
 /// Upper bound (exclusive) on cumulative CPU consumption (`consumed + granted`,
@@ -31,17 +28,18 @@ inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>
 /// long-running query.
 ///
 /// Exponential bands with base 64 ms and growth factor 2: a query stays in
-/// level 1 for up to 64 ms of accumulated CPU, level 2 up to 128 ms, doubling
+/// level 0 for up to 64 ms of accumulated CPU, level 1 up to 128 ms, doubling
 /// each step, falling to the lowest priority once it has accumulated more than
 /// ~4 s of CPU. These are starting defaults; tune as needed.
-inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels - 1> kElasticBandThresholdsNs = {
+inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels> kElasticBandThresholdsNs = {
     static_cast<ResourceCost>(6'296'000'000),    /// L0: <    4 s
     static_cast<ResourceCost>(25'004'000'000),   /// L1: <   32 s
-    std::numeric_limits<ResourceCost>::max(),    /// L3: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L2: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L3: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L4: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L5: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L6: catch-all
+    std::numeric_limits<ResourceCost>::max(),    /// L7: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L8: catch-all
 };
 

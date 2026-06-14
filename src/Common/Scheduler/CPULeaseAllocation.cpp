@@ -636,23 +636,14 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 
     /// Derive request priority -- a discrete level in [0, MultiLevelFeedbackQueue::kPriorityLevels).
     ///
-    /// Small queries (computed cap <= 4) are "inelastic" and receive strict / absolute
-    /// priority via the reserved level 0 so a handful of quanta can drain ahead of any
-    /// larger query. Since we only reach this code path when `allocated < cap`,
-    /// "has not yet reached its desired capacity" is implicit.
-    ///
-    /// Larger queries share fairly across the elastic bands [1, kPriorityLevels - 1].
+    /// All queries share fairly across the elastic bands [0, kPriorityLevels - 1].
     /// The band is picked from `requested_ns` (cumulative consumed + outstanding granted
     /// quantum budget), so a query that has used less CPU sits in a higher (lower-index)
     /// band. Compared with the previous continuous `consumed_ns / 1024^3` priority, the
     /// discrete bands bound the number of buckets and avoid the "same age preempt each
     /// other" thrash when two queries have near-identical virtual time.
-    static constexpr size_t kSmallQueryCapThreshold = 2;
     Priority priority{};
-    if (cap <= kSmallQueryCapThreshold)
-        priority.value = 0; /// MLFQ inelastic level
-    else
-        priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
+    priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;

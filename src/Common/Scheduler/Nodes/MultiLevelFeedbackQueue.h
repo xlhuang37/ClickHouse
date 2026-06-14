@@ -35,10 +35,9 @@ namespace ErrorCodes
  *  - removes the "infinitesimal granularity" thrash where two requests with priority
  *    values one apart would constantly preempt each other.
  *
- * Level 0 is reserved for inelastic/strict-priority traffic (e.g. small CPU-lease
- * queries with `cap <= kSmallQueryCapThreshold`). Levels 1..(kPriorityLevels-1) are
- * elastic bands; the caller decides which band by passing a `Priority{value}` whose
- * `value` is the bucket index. Any out-of-range value is clamped into [0, kPriorityLevels-1].
+ * Levels 0..(kPriorityLevels-1) are elastic bands; the caller decides which band
+ * by passing a `Priority{value}` whose `value` is the bucket index. Any out-of-range
+ * value is clamped into [0, kPriorityLevels-1].
  *
  * Mapping a query's cumulative CPU consumption (consumed + granted, i.e.
  * `CPULeaseAllocation::requested_ns`) to a band is done by `pickElasticLevel()` (see .cpp).
@@ -53,7 +52,7 @@ namespace ErrorCodes
 class MultiLevelFeedbackQueue final : public ISchedulerPriorityQueue
 {
 public:
-    /// Number of priority levels. Level 0 = highest (inelastic); level K-1 = lowest.
+    /// Number of priority levels. Level 0 = highest; level K-1 = lowest.
     /// Kept in the header so `CPULeaseAllocation` can reason about valid level indices.
     static constexpr size_t kPriorityLevels = 9;
 
@@ -133,8 +132,7 @@ public:
 
     /// Map a cumulative CPU consumption value (in nanoseconds; we use
     /// `CPULeaseAllocation::requested_ns` = consumed + granted) to an elastic band
-    /// in the range [1, kPriorityLevels - 1]. Level 0 is reserved for inelastic
-    /// traffic and is never returned by this helper.
+    /// in the range [0, kPriorityLevels - 1].
     static Priority::Value pickElasticLevel(ResourceCost cumulative_cpu_ns);
 
 private:
