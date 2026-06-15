@@ -689,12 +689,18 @@ void CPULeaseAllocation::updateElasticity()
     if (inelastic)
     {
         if (demand > kElasticEnterThreshold)
+        {
             inelastic = false;
+            LOG_TRACE(log, "Switching to elastic mode (demand={} > {})", demand, kElasticEnterThreshold);
+        }
     }
     else
     {
         if (demand < kInelasticEnterThreshold)
+        {
             inelastic = true;
+            LOG_TRACE(log, "Switching to inelastic mode (demand={} < {})", demand, kInelasticEnterThreshold);
+        }
     }
 }
 
