@@ -1,5 +1,7 @@
 #include <Common/Scheduler/CPULeaseAllocation.h>
+#include <Common/Scheduler/ISchedulerPriorityQueue.h>
 #include <Common/Scheduler/ISchedulerQueue.h>
+#include <Common/Scheduler/Nodes/MultiLevelFeedbackQueue.h>
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/CurrentThread.h>
@@ -141,7 +143,10 @@ void CPULeaseAllocation::RequestChain::granted()
         head = requests.begin();
 }
 
-bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost requested_ns_)
+CPULeaseAllocation::RequestChain::EnqueueResult CPULeaseAllocation::RequestChain::enqueue(
+    ResourceCost cost,
+    ResourceCost requested_ns_,
+    Priority priority)
 {
     chassert(!enqueued);
 
@@ -153,15 +158,20 @@ bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost r
     {
         head->is_noncompeting = false;
         // We do not use enqueueRequestUsingBudget() because it redistributes resource between requests in the queue (which might be from different queries).
-        // Instead we do budgeting for every query independently for better fairness
-        queue->enqueueRequest(&*head);
+        // Instead we do budgeting for every query independently for better fairness.
+        // All queues created via UnifiedSchedulerNode are MultiLevelFeedbackQueue, so the downcast
+        // is expected to always succeed. The chassert guards against someone later wiring a
+        // non-priority queue here.
+        auto * pqueue = dynamic_cast<ISchedulerPriorityQueue *>(queue);
+        chassert(pqueue);
+        pqueue->enqueueRequest(&*head, priority);
         enqueued = true;
-        return true; // Request is enqueued to the scheduler queue, we will wait for it to be granted
+        return EnqueueResult::Enqueued; // Request is enqueued to the scheduler queue, we will wait for it to be granted
     }
     else // noncompeting slot - provide immediately for free
     {
         head->is_noncompeting = true;
-        return false; // No need to enqueue, we will grant it immediately
+        return EnqueueResult::NonCompeting; // No need to enqueue, we will grant it immediately
     }
 }
 
@@ -602,9 +612,21 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
     if (allocated == max_threads || shutdown)
         return true;
 
+    /// Derive request priority -- a discrete level in [0, MultiLevelFeedbackQueue::kPriorityLevels).
+    ///
+    /// All queries share fairly across the elastic bands [0, kPriorityLevels - 1].
+    /// The band is picked from `requested_ns` (cumulative consumed + outstanding granted
+    /// quantum budget), so a query that has used less CPU sits in a higher (lower-index)
+    /// band. Compared with the previous continuous `consumed_ns / 1024^3` priority, the
+    /// discrete bands bound the number of buckets and avoid the "same age preempt each
+    /// other" thrash when two queries have near-identical virtual time.
+    Priority priority{};
+    priority.value = MultiLevelFeedbackQueue::pickElasticLevel(requested_ns);
+
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
-    if (requests.enqueue(cost, requested_ns))
+    const auto enqueue_result = requests.enqueue(cost, requested_ns, priority);
+    if (enqueue_result == RequestChain::EnqueueResult::Enqueued)
     {
         scheduled_increment.add();
         wait_timer.emplace(wait_counters->timer(ProfileEvents::ConcurrencyControlWaitMicroseconds));
