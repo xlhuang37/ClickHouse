@@ -32,10 +32,10 @@ inline constexpr Priority::Value kMaxElasticLevel = static_cast<Priority::Value>
 /// each step, falling to the lowest priority once it has accumulated more than
 /// ~4 s of CPU. These are starting defaults; tune as needed.
 inline constexpr std::array<ResourceCost, MultiLevelFeedbackQueue::kPriorityLevels> kElasticBandThresholdsNs = {
-    static_cast<ResourceCost>(6'296'000'000),    /// L0: <    4 s
-    static_cast<ResourceCost>(25'004'000'000),   /// L1: <   32 s
-    std::numeric_limits<ResourceCost>::max(),    /// L2: catch-all
-    std::numeric_limits<ResourceCost>::max(),    /// L3: catch-all
+    static_cast<ResourceCost>(1'024'000'000),    /// L0: <    4 s
+    static_cast<ResourceCost>(4'096'000'000),   /// L1: <   32 s
+    static_cast<ResourceCost>(16'384'000'000),   /// L1: <   32 s
+    static_cast<ResourceCost>(65'536'000'000),   /// L1: <   32 s
     std::numeric_limits<ResourceCost>::max(),    /// L4: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L5: catch-all
     std::numeric_limits<ResourceCost>::max(),    /// L6: catch-all
