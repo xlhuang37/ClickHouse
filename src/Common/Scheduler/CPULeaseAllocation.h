@@ -44,15 +44,6 @@ struct CPULeaseSettings
     /// Callback to be invoked when a thread is resumed
     std::function<void(size_t slot_id)> on_resume;
 
-    /// Callback returning the current number of ready tasks in the owning pipeline.
-    /// When set, schedule() caps the number of in-flight CPU slot requests at
-    /// min(max_threads, max(1, running_count + n / 3)) where `running_count` is the
-    /// allocator's own count of currently running (leased & non-preempted) threads.
-    /// This prevents queries that cannot fully parallelize (e.g. behind a pipeline
-    /// breaker) from over-provisioning CPU quanta.
-    /// If unset, the old behavior (cap at max_threads only) is preserved.
-    std::function<size_t()> get_tasks_count;
-
     /// For debugging purposes, not used in production
     String workload;
 
@@ -299,13 +290,12 @@ private:
         {
             Enqueued,
             NonCompeting,
-            Throttled,
         };
 
         RequestChain(CPULeaseAllocation * lease, size_t max_threads_, ResourceLink master_link_, ResourceLink worker_link_);
         void finish();
         void granted();
-        EnqueueResult enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority, bool throttle_non_master);
+        EnqueueResult enqueue(ResourceCost cost, ResourceCost requested_ns_, Priority priority);
         void cancel(std::unique_lock<std::mutex> & lock);
         void scheduled();
         ResourceCost getMaxConsumed() const { return tail->max_consumed; }

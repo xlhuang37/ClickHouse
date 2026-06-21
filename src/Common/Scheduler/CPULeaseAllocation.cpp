@@ -145,15 +145,9 @@ void CPULeaseAllocation::RequestChain::granted()
 CPULeaseAllocation::RequestChain::EnqueueResult CPULeaseAllocation::RequestChain::enqueue(
     ResourceCost cost,
     ResourceCost requested_ns_,
-    Priority priority,
-    bool throttle_non_master)
+    Priority priority)
 {
     chassert(!enqueued);
-
-    // Do not throttle the master-slot request: it must keep progressing even when
-    // worker parallelism is capped by the dynamic tasks-based limit.
-    if (throttle_non_master && !request_master_slot)
-        return EnqueueResult::Throttled;
 
     head->reset(cost);
     head->is_master_slot = std::exchange(request_master_slot, false);
@@ -613,24 +607,6 @@ void CPULeaseAllocation::consume(std::unique_lock<std::mutex> & lock, ResourceCo
 
 bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 {
-    /// Upper bound on in-flight CPU slot requests.
-    /// The hard cap is `max_threads`. If the pipeline exposes its number of ready tasks,
-    /// we additionally clamp to `max(1, running_count + tasks / 3)` to avoid over-provisioning
-    /// CPU quanta for queries that cannot keep `max_threads` threads busy (e.g. blocked by a
-    /// pipeline breaker). Rationale for each term:
-    ///  - `running_count` keeps enough in-flight quanta to cover every currently running thread
-    ///    so consumption does not starve them;
-    ///  - `tasks / 3` adds headroom proportional to the amount of parallelizable work available;
-    ///  - the `max(..., 1)` floor guarantees progress at construction time (pipeline queues are
-    ///    empty and no thread is running yet, so without the floor the first request would be
-    ///    refused) and keeps at least one request in flight so `consume()` can re-evaluate the
-    ///    cap as new tasks appear.
-    size_t cap = max_threads;
-    if (settings.get_tasks_count)
-    {
-        size_t tasks_count = settings.get_tasks_count() + threads.running_count;
-        cap = std::max<size_t>(std::min<size_t>(max_threads, tasks_count), 2);
-    }
     if (allocated == max_threads || shutdown)
         return true;
 
@@ -647,7 +623,7 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
-    const auto enqueue_result = requests.enqueue(cost, requested_ns, priority, cap < allocated);
+    const auto enqueue_result = requests.enqueue(cost, requested_ns, priority);
     if (enqueue_result == RequestChain::EnqueueResult::Enqueued)
     {
         scheduled_increment.add();
@@ -655,8 +631,6 @@ bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
         LOG_EVENT(E);
         return true;
     }
-    if (enqueue_result == RequestChain::EnqueueResult::Throttled)
-        return true;
     return false; // Request is noncompeting and should be granted immediately
 }
 
