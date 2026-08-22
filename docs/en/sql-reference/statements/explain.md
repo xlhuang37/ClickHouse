@@ -544,6 +544,7 @@ Settings:
 - `header` — Prints header for each output port. Default: 0.
 - `graph` — Prints a graph described in the [DOT](https://en.wikipedia.org/wiki/DOT_(graph_description_language)) graph description language. Default: 0.
 - `compact` — Prints graph in compact mode if `graph` setting is enabled. Default: 1.
+- `inelastic` — Prints `HighPriority` next to unique-instance or unit-width processors that the local executor schedules ahead of elastic replicas. Default: 0.
 
 When `compact=0` and `graph=1` processor names will contain an additional suffix with unique processor identifier.
 

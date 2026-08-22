@@ -2,6 +2,8 @@
 #include <IO/WriteBufferFromString.h>
 #include <IO/Operators.h>
 
+#include <vector>
+
 namespace DB
 {
 
@@ -48,11 +50,13 @@ ExecutorTasks::SpawnStatus ExecutorTasks::tryWakeUpAnyOtherThreadWithTasks(Execu
 {
     if (!threads_queue.empty() && !finished)
     {
-        // Task execution priority is take into account:
-        // We try first wake up thread to do fast tasks and only then to do regular tasks
+        // Task execution priority is taken into account:
+        // async (fast) first, then inelastic (high priority), then regular.
         if (!fast_task_queue.empty())
             return tryWakeUpAnyOtherThreadWithTasksInQueue(self, fast_task_queue, lock);
-        else if (!task_queue.empty())
+        if (!high_priority_task_queue.empty())
+            return tryWakeUpAnyOtherThreadWithTasksInQueue(self, high_priority_task_queue, lock);
+        if (!task_queue.empty())
             return tryWakeUpAnyOtherThreadWithTasksInQueue(self, task_queue, lock);
     }
     return SHOULD_SPAWN; // There is no idle threads - we'd like to have more threads
@@ -104,6 +108,13 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
             if (fast_task_queue.empty())
                 has_fast_tasks = false;
         }
+        else if (!high_priority_task_queue.empty())
+        {
+            context.setTask(high_priority_task_queue.pop(context.thread_number));
+            total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
+            if (high_priority_task_queue.empty())
+                has_high_priority_tasks = false;
+        }
         else if (!task_queue.empty())
         {
             context.setTask(task_queue.pop(context.thread_number));
@@ -121,7 +132,7 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
 
         /// This thread has no tasks to do and is going to wait.
         /// Finish execution if this was the last active thread.
-        chassert(task_queue.empty() && fast_task_queue.empty());
+        chassert(task_queue.empty() && fast_task_queue.empty() && high_priority_task_queue.empty());
         if (threads_queue.size() + 1 == total_slots && async_task_queue.empty())
         {
             lock.unlock();
@@ -154,15 +165,65 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
     context.wait(finished);
 }
 
+void ExecutorTasks::enqueueTask(ExecutingGraph::Node * node, size_t thread_num)
+{
+    if (node->processor->isHighPriority())
+    {
+        if (high_priority_task_queue.empty())
+            has_high_priority_tasks = true;
+        high_priority_task_queue.push(node, thread_num);
+    }
+    else
+    {
+        task_queue.push(node, thread_num);
+    }
+    total_tasks_count.fetch_add(1, std::memory_order_relaxed);
+}
+
 ExecutorTasks::SpawnStatus ExecutorTasks::pushTasks(Queue & queue, Queue & async_queue, ExecutionThreadContext & context)
 {
-    /// Take local task from queue if has one.
+    /// Local-task optimization: prefer a high-priority neighbor. Do not keep executing
+    /// elastic neighbors locally while inelastic work is already queued.
     if (!queue.empty() && !has_fast_tasks.load(std::memory_order_relaxed)
         && context.num_scheduled_local_tasks < ExecutionThreadContext::max_scheduled_local_tasks)
     {
-        ++context.num_scheduled_local_tasks;
-        context.setTask(queue.front());
-        queue.pop();
+        std::vector<ExecutingGraph::Node *> pending;
+        pending.reserve(queue.size());
+        while (!queue.empty())
+        {
+            pending.push_back(queue.front());
+            queue.pop();
+        }
+
+        size_t local_idx = pending.size();
+        for (size_t i = 0; i < pending.size(); ++i)
+        {
+            if (pending[i]->processor->isHighPriority())
+            {
+                local_idx = i;
+                break;
+            }
+        }
+
+        if (local_idx == pending.size() && !has_high_priority_tasks.load(std::memory_order_relaxed) && !pending.empty())
+            local_idx = 0;
+
+        if (local_idx < pending.size())
+        {
+            ++context.num_scheduled_local_tasks;
+            context.setTask(pending[local_idx]);
+        }
+        else
+        {
+            context.num_scheduled_local_tasks = 0;
+            context.setTask(nullptr);
+        }
+
+        for (size_t i = 0; i < pending.size(); ++i)
+        {
+            if (i != local_idx)
+                queue.push(pending[i]);
+        }
     }
     else
     {
@@ -186,8 +247,7 @@ ExecutorTasks::SpawnStatus ExecutorTasks::pushTasks(Queue & queue, Queue & async
 
         while (!queue.empty() && !finished)
         {
-            task_queue.push(queue.front(), context.thread_number);
-            total_tasks_count.fetch_add(1, std::memory_order_relaxed);
+            enqueueTask(queue.front(), context.thread_number);
             queue.pop();
         }
 
@@ -204,6 +264,7 @@ void ExecutorTasks::init(size_t num_threads_, size_t use_threads_, const SlotAll
     threads_queue.init(num_threads);
     task_queue.init(num_threads);
     fast_task_queue.init(num_threads);
+    high_priority_task_queue.init(num_threads);
 
     {
         std::lock_guard lock(mutex); // In case finish() is executed concurrently with init() due to exception
@@ -246,8 +307,7 @@ void ExecutorTasks::fill(Queue & queue, [[maybe_unused]] Queue & async_queue)
 
     while (!queue.empty())
     {
-        task_queue.push(queue.front(), next_thread);
-        total_tasks_count.fetch_add(1, std::memory_order_relaxed);
+        enqueueTask(queue.front(), next_thread);
         queue.pop();
 
         ++next_thread;
@@ -299,16 +359,15 @@ void ExecutorTasks::preempt(size_t slot_id)
     --total_slots;
 
     /// We should make sure that preempted thread has no local task inside context.
-    /// It is allowed to have tasks in `task_queue` or `fast_task_queue` because they can be stealed by other threads.
+    /// It is allowed to have tasks in the shared queues because they can be stolen by other threads.
     auto & context = executor_contexts[slot_id];
     if (auto * task = context->popTask())
     {
-        task_queue.push(task, slot_id);
-        total_tasks_count.fetch_add(1, std::memory_order_relaxed);
+        enqueueTask(task, slot_id);
         /// Wake up at least one thread to avoid deadlocks (all other threads maybe idle)
         tryWakeUpAnyOtherThreadWithTasks(*context, lock); // this releases the lock if it wakes up a thread
     }
-    else if (task_queue.empty() && fast_task_queue.empty() && async_task_queue.empty() && threads_queue.size() == total_slots)
+    else if (task_queue.empty() && fast_task_queue.empty() && high_priority_task_queue.empty() && async_task_queue.empty() && threads_queue.size() == total_slots)
     {
         /// Finish pipeline if preempted thread was the last non-idle thread executed the last task of the whole pipeline
         lock.unlock();
@@ -370,12 +429,14 @@ String ExecutorTasks::dump()
     buffer << "  total_slots: " << total_slots << "\n";
     buffer << "  finished: " << static_cast<int>(finished) << "\n";
     buffer << "  has_fast_tasks: " << has_fast_tasks.load(std::memory_order_relaxed) << "\n";
+    buffer << "  has_high_priority_tasks: " << has_high_priority_tasks.load(std::memory_order_relaxed) << "\n";
 
     for (size_t i = 0; i < slot_count.size(); ++i)
         buffer << "  slot_count[" << i << "]: " << slot_count[i] << "\n";
 
     // Dump task queues
     buffer << "  task_queue size: " << task_queue.size() << "\n";
+    buffer << "  high_priority_task_queue size: " << high_priority_task_queue.size() << "\n";
     buffer << "  fast_task_queue size: " << fast_task_queue.size() << "\n";
     buffer << "  async_task_queue size: " << async_task_queue.size() << "\n";
     buffer << "  threads_queue size: " << threads_queue.size() << "\n";

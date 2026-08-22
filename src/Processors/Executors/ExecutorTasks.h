@@ -33,12 +33,19 @@ class ExecutorTasks
     TaskQueue<ExecutingGraph::Node> fast_task_queue;
     std::atomic_bool has_fast_tasks = false; // Required only to enable local task optimization
 
+    /// Inelastic (unique-instance / unit-width) processors. Preferred over `task_queue`,
+    /// but below async work in `fast_task_queue`.
+    TaskQueue<ExecutingGraph::Node> high_priority_task_queue;
+    std::atomic_bool has_high_priority_tasks = false;
+
+    void enqueueTask(ExecutingGraph::Node * node, size_t thread_num);
+
     /// Queue which stores tasks where processors returned Async status after prepare.
     /// If multiple threads are used, main thread will wait for async tasks.
     /// For single thread, will wait for async tasks only when task_queue is empty.
     PollingQueue async_task_queue;
 
-    /// Approximate count of ready tasks across task_queue, fast_task_queue and async_task_queue.
+    /// Approximate count of ready tasks across task_queue, high_priority_task_queue, fast_task_queue and async_task_queue.
     /// Updated under `mutex` on every push/pop, but read lock-free (memory_order_relaxed) by the
     /// CPU scheduler thread via getTasksCount() as a heuristic input. A transiently stale value
     /// is acceptable here since it only informs the upper bound on in-flight CPU lease requests.
@@ -98,13 +105,16 @@ public:
     ///   0. For num_threads == 1 we check async_task_queue directly
     ///   1. Async tasks from fast_task_queue for specified thread
     ///   2. Async tasks from fast_task_queue for other threads
-    ///   3. Regular tasks from task_queue for specified thread
-    ///   4. Regular tasks from task_queue for other threads
+    ///   3. Inelastic tasks from high_priority_task_queue for specified thread
+    ///   4. Inelastic tasks from high_priority_task_queue for other threads
+    ///   5. Regular tasks from task_queue for specified thread
+    ///   6. Regular tasks from task_queue for other threads
     void tryGetTask(ExecutionThreadContext & context);
 
-    // Adds regular tasks from `queue` and async tasks from `async_queue` into queues for specified thread `context`.
-    // Local task optimization: the first regular task could be placed directly into thread to be executed next.
-    // For async tasks proessor->schedule() is called.
+    // Adds regular / high-priority tasks from `queue` and async tasks from `async_queue` into queues for specified thread `context`.
+    // Local task optimization: a high-priority neighbor is preferred; otherwise the first regular task
+    // could be placed directly into the thread to be executed next (unless high-priority work is queued).
+    // For async tasks processor->schedule() is called.
     // If non-local tasks were added, wake up one thread to process them.
     SpawnStatus pushTasks(Queue & queue, Queue & async_queue, ExecutionThreadContext & context);
 

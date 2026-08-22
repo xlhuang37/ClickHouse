@@ -22,6 +22,15 @@ namespace ErrorCodes
     extern const int LOGICAL_ERROR;
 }
 
+namespace
+{
+void markInelastic(const ProcessorPtr & processor)
+{
+    if (processor)
+        processor->setHighPriority();
+}
+}
+
 static void checkSource(const IProcessor & source)
 {
     if (!source.getInputs().empty())
@@ -66,6 +75,9 @@ static OutputPort * uniteExtremes(const OutputPortRawPtrs & ports, SharedHeader 
     connect(resize->getOutputs().front(), extremes->getInputPort());
     connect(extremes->getOutputPort(), sink->getPort());
 
+    markInelastic(resize);
+    markInelastic(extremes);
+    markInelastic(sink);
     processors.emplace_back(std::move(resize));
     processors.emplace_back(std::move(extremes));
     processors.emplace_back(std::move(sink));
@@ -97,6 +109,8 @@ static OutputPort * uniteTotals(const OutputPortRawPtrs & ports, SharedHeader & 
 
     connect(concat->getOutputs().front(), limit->getInputPort());
 
+    markInelastic(concat);
+    markInelastic(limit);
     processors.emplace_back(std::move(concat));
     processors.emplace_back(std::move(limit));
 
@@ -375,6 +389,7 @@ void Pipe::addTotalsSource(ProcessorPtr source)
     if (collected_processors)
         collected_processors->emplace_back(source);
 
+    markInelastic(source);
     totals_port = &source->getOutputs().front();
     processors->emplace_back(std::move(source));
 }
@@ -395,6 +410,7 @@ void Pipe::addExtremesSource(ProcessorPtr source)
     if (collected_processors)
         collected_processors->emplace_back(source);
 
+    markInelastic(source);
     extremes_port = &source->getOutputs().front();
     processors->emplace_back(std::move(source));
 }
@@ -410,6 +426,7 @@ static void dropPort(OutputPort *& port, Processors & processors, Processors * c
     if (collected_processors)
         collected_processors->emplace_back(null_sink);
 
+    markInelastic(null_sink);
     processors.emplace_back(std::move(null_sink));
     port = nullptr;
 }
@@ -569,6 +586,8 @@ void Pipe::addTransform(
     if (collected_processors)
         collected_processors->emplace_back(transform);
 
+    /// `addTransform` inserts a single processor over all current ports (gather, resize, limit, ...).
+    markInelastic(transform);
     processors->emplace_back(std::move(transform));
 
     max_parallel_streams = std::max<size_t>(max_parallel_streams, output_ports.size());
@@ -619,6 +638,9 @@ void Pipe::addSimpleTransform(const ProcessorGetterSharedHeaderWithStreamKind & 
 
             if (collected_processors)
                 collected_processors->emplace_back(transform);
+
+            if (stream_type != StreamType::Main || output_ports.size() <= 1)
+                markInelastic(transform);
 
             processors->emplace_back(std::move(transform));
         }
@@ -673,6 +695,9 @@ void Pipe::addChains(std::vector<Chain> chains)
             if (collected_processors)
                 collected_processors->emplace_back(transform);
 
+            if (chains.size() <= 1)
+                markInelastic(transform);
+
             processors->emplace_back(std::move(transform));
         }
     }
@@ -712,6 +737,7 @@ void Pipe::addSplitResizeTransform(size_t num_streams, size_t min_outstreams_per
             {
                 auto null_source = std::make_shared<NullSource>(getSharedHeader());
                 connect(null_source->getPort(), *it);
+                markInelastic(null_source);
                 processors->emplace_back(std::move(null_source));
             }
         }
@@ -727,12 +753,14 @@ void Pipe::addSplitResizeTransform(size_t num_streams, size_t min_outstreams_per
             {
                 auto null_sink = std::make_shared<NullSink>(getSharedHeader());
                 connect(*it, null_sink->getPort());
+                markInelastic(null_sink);
                 processors->emplace_back(std::move(null_sink));
             }
         }
 
         if (collected_processors)
             collected_processors->emplace_back(resize);
+        markInelastic(resize);
         processors->emplace_back(std::move(resize));
     }
 
@@ -820,6 +848,8 @@ void Pipe::setSinks(const Pipe::ProcessorGetterSharedHeaderWithStreamKind & gett
             transform = std::make_shared<NullSink>(stream->getSharedHeader());
 
         connect(*stream, transform->getInputs().front());
+        if (stream_type != StreamType::Main || output_ports.size() <= 1)
+            markInelastic(transform);
         processors->emplace_back(std::move(transform));
     };
 
@@ -838,7 +868,16 @@ void Pipe::transform(const Transformer & transformer, bool check_ports)
     if (output_ports.empty())
         throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot transform empty Pipe");
 
+    const size_t num_streams_before = output_ports.size();
     auto new_processors = transformer(output_ports);
+
+    const bool unit_width = num_streams_before <= 1;
+    const bool unique_instance = new_processors.size() == 1;
+    for (const auto & processor : new_processors)
+    {
+        if (unit_width || unique_instance || processor->getInputs().size() > 1)
+            markInelastic(processor);
+    }
 
     /// Create hash table with new processors.
     std::unordered_set<const IProcessor *> set;

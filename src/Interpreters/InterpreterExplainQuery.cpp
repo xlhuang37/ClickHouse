@@ -291,6 +291,7 @@ struct QueryPipelineSettings
             {"header", query_pipeline_options.header},
             {"graph", graph},
             {"compact", compact},
+            {"inelastic", query_pipeline_options.inelastic},
     };
 
     std::unordered_map<std::string, std::reference_wrapper<Int64>> integer_settings;

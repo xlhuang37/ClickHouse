@@ -274,6 +274,11 @@ public:
     void setDescription(const std::string & description_) { processor_description = description_; }
     const std::string & getDescription() const { return processor_description; }
 
+    /// Inelastic processors (a unique instance, or a unit-width chain after `resize(1)`)
+    /// are scheduled ahead of elastic replicas in `PipelineExecutor`.
+    void setHighPriority() { high_priority = true; }
+    bool isHighPriority() const { return high_priority; }
+
     /// Helpers for pipeline executor.
     void setStream(size_t value) { stream_number = value; }
     size_t getStream() const { return stream_number; }
@@ -375,6 +380,7 @@ protected:
 
     std::atomic<bool> is_cancelled{false};
     bool spillable = false;
+    bool high_priority = false;
 
 private:
     /// For:
