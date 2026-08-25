@@ -89,6 +89,7 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
         {
             if (auto res = async_task_queue.tryGetReadyTask(lock))
             {
+                total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
                 context.setTask(static_cast<ExecutingGraph::Node *>(res.data));
                 return;
             }
@@ -99,12 +100,14 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
         if (!fast_task_queue.empty())
         {
             context.setTask(fast_task_queue.pop(context.thread_number));
+            total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
             if (fast_task_queue.empty())
                 has_fast_tasks = false;
         }
         else if (!task_queue.empty())
         {
             context.setTask(task_queue.pop(context.thread_number));
+            total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
         }
 
         /// Task found.
@@ -138,6 +141,7 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Empty task was returned from async task queue");
             }
 
+            total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
             context.setTask(static_cast<ExecutingGraph::Node *>(res.data));
             return;
         }
@@ -175,6 +179,7 @@ ExecutorTasks::SpawnStatus ExecutorTasks::pushTasks(Queue & queue, Queue & async
         {
             auto [fd, events] = async_queue.front()->processor->scheduleForEvent();
             async_task_queue.addTask(context.thread_number, async_queue.front(), fd, events);
+            total_tasks_count.fetch_add(1, std::memory_order_relaxed);
             async_queue.pop();
         }
 #endif
@@ -182,6 +187,7 @@ ExecutorTasks::SpawnStatus ExecutorTasks::pushTasks(Queue & queue, Queue & async
         while (!queue.empty() && !finished)
         {
             task_queue.push(queue.front(), context.thread_number);
+            total_tasks_count.fetch_add(1, std::memory_order_relaxed);
             queue.pop();
         }
 
@@ -226,6 +232,7 @@ void ExecutorTasks::fill(Queue & queue, [[maybe_unused]] Queue & async_queue)
     {
         auto [fd, events] = async_queue.front()->processor->scheduleForEvent();
         async_task_queue.addTask(next_thread, async_queue.front(), fd, events);
+        total_tasks_count.fetch_add(1, std::memory_order_relaxed);
         async_queue.pop();
 
         ++next_thread;
@@ -240,6 +247,7 @@ void ExecutorTasks::fill(Queue & queue, [[maybe_unused]] Queue & async_queue)
     while (!queue.empty())
     {
         task_queue.push(queue.front(), next_thread);
+        total_tasks_count.fetch_add(1, std::memory_order_relaxed);
         queue.pop();
 
         ++next_thread;
@@ -296,6 +304,7 @@ void ExecutorTasks::preempt(size_t slot_id)
     if (auto * task = context->popTask())
     {
         task_queue.push(task, slot_id);
+        total_tasks_count.fetch_add(1, std::memory_order_relaxed);
         /// Wake up at least one thread to avoid deadlocks (all other threads maybe idle)
         tryWakeUpAnyOtherThreadWithTasks(*context, lock); // this releases the lock if it wakes up a thread
     }
@@ -324,6 +333,7 @@ void ExecutorTasks::processAsyncTasks()
             auto * node = static_cast<ExecutingGraph::Node *>(task.data);
             node->processor->onAsyncJobReady();
 
+            /// Task is moved from async_task_queue to fast_task_queue: net zero for the total counter.
             if (fast_task_queue.empty())
                 has_fast_tasks = true;
             fast_task_queue.push(node, task.thread_num);
@@ -369,6 +379,7 @@ String ExecutorTasks::dump()
     buffer << "  fast_task_queue size: " << fast_task_queue.size() << "\n";
     buffer << "  async_task_queue size: " << async_task_queue.size() << "\n";
     buffer << "  threads_queue size: " << threads_queue.size() << "\n";
+    buffer << "  total_tasks_count (approx): " << total_tasks_count.load(std::memory_order_relaxed) << "\n";
 
     return buffer.str();
 }
