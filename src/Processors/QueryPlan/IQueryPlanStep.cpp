@@ -149,6 +149,9 @@ static void doDescribeProcessor(const IProcessor & processor, size_t count, IQue
     if (num_inputs != 1 || num_outputs != 1)
         settings.out << " " << std::to_string(num_inputs) << " → " << std::to_string(num_outputs);
 
+    if (settings.write_inelastic && processor.isHighPriority())
+        settings.out << " HighPriority";
+
     settings.out << '\n';
 
     if (settings.write_header)

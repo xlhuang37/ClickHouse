@@ -602,7 +602,7 @@ void QueryPlan::explainPipeline(WriteBuffer & buffer, const ExplainPipelineOptio
 {
     checkInitialized();
 
-    IQueryPlanStep::FormatSettings settings{.out = buffer, .header_prefix = "", .detail_prefix = "", .write_header = options.header};
+    IQueryPlanStep::FormatSettings settings{.out = buffer, .header_prefix = "", .detail_prefix = "", .write_header = options.header, .write_inelastic = options.inelastic};
 
     struct Frame
     {

@@ -423,6 +423,7 @@ QueryPipeline::QueryPipeline(Chain chain)
 
     auto sink = std::make_shared<EmptySink>(chain.getOutputPort().getSharedHeader());
     connect(chain.getOutputPort(), sink->getPort());
+    sink->setHighPriority();
     processors->emplace_back(std::move(sink));
 
     input = &chain.getInputPort();
@@ -458,6 +459,7 @@ QueryPipeline::QueryPipeline(std::shared_ptr<IOutputFormat> format)
 
     output_format = format.get();
 
+    format->setHighPriority();
     processors->emplace_back(std::move(format));
 }
 
@@ -469,6 +471,7 @@ static void drop(OutputPort *& port, Processors & processors)
     auto null_sink = std::make_shared<NullSink>(port->getSharedHeader());
     connect(*port, null_sink->getPort());
 
+    null_sink->setHighPriority();
     processors.emplace_back(std::move(null_sink));
     port = nullptr;
 }
@@ -484,6 +487,7 @@ void QueryPipeline::complete(std::shared_ptr<ISink> sink)
     drop(extremes, *processors);
 
     connect(*output, sink->getPort());
+    sink->setHighPriority();
     processors->emplace_back(std::move(sink));
     output = nullptr;
 }
@@ -505,6 +509,7 @@ void QueryPipeline::complete(Chain chain)
     auto sink = std::make_shared<EmptySink>(chain.getOutputPort().getSharedHeader());
     connect(*output, chain.getInputPort());
     connect(chain.getOutputPort(), sink->getPort());
+    sink->setHighPriority();
     processors->emplace_back(std::move(sink));
     output = nullptr;
 }
@@ -537,6 +542,7 @@ static void addMaterializing(OutputPort *& output, Processors & processors, bool
     auto materializing = std::make_shared<MaterializingTransform>(output->getSharedHeader(), remove_special_column_representations);
     connect(*output, materializing->getInputPort());
     output = &materializing->getOutputPort();
+    materializing->setHighPriority();
     processors.emplace_back(std::move(materializing));
 }
 
@@ -590,6 +596,7 @@ void QueryPipeline::complete(std::shared_ptr<IOutputFormat> format)
     }
     output_format = format.get();
 
+    format->setHighPriority();
     processors->emplace_back(std::move(format));
 }
 

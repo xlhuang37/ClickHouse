@@ -122,6 +122,8 @@ public:
     {
         /// Show header of output ports.
         bool header = false;
+        /// Show `HighPriority` on inelastic processors.
+        bool inelastic = false;
     };
 
     JSONBuilder::ItemPtr explainPlan(const ExplainPlanOptions & options) const;

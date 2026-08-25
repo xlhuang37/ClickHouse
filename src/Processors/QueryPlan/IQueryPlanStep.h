@@ -89,6 +89,7 @@ public:
         const bool write_header = false;
         bool compact = false;
         bool pretty = false;
+        bool write_inelastic = false;
     };
 
     /// Get detailed description of step actions. This is shown in EXPLAIN query with options `actions = 1`.

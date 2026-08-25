@@ -48,7 +48,7 @@ ExecutorTasks::SpawnStatus ExecutorTasks::tryWakeUpAnyOtherThreadWithTasks(Execu
 {
     if (!threads_queue.empty() && !finished)
     {
-        // Task execution priority is take into account:
+        // Task execution priority is taken into account:
         // We try first wake up thread to do fast tasks and only then to do regular tasks
         if (!fast_task_queue.empty())
             return tryWakeUpAnyOtherThreadWithTasksInQueue(self, fast_task_queue, lock);
@@ -89,22 +89,25 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
         {
             if (auto res = async_task_queue.tryGetReadyTask(lock))
             {
+                total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
                 context.setTask(static_cast<ExecutingGraph::Node *>(res.data));
                 return;
             }
         }
     #endif
 
-        /// Try get async task assigned to this thread or any other task from queue.
+        /// Try get async / inelastic task assigned to this thread or any other task from queue.
         if (!fast_task_queue.empty())
         {
             context.setTask(fast_task_queue.pop(context.thread_number));
+            total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
             if (fast_task_queue.empty())
                 has_fast_tasks = false;
         }
         else if (!task_queue.empty())
         {
             context.setTask(task_queue.pop(context.thread_number));
+            total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
         }
 
         /// Task found.
@@ -138,6 +141,7 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
                 throw Exception(ErrorCodes::LOGICAL_ERROR, "Empty task was returned from async task queue");
             }
 
+            total_tasks_count.fetch_sub(1, std::memory_order_relaxed);
             context.setTask(static_cast<ExecutingGraph::Node *>(res.data));
             return;
         }
@@ -148,6 +152,18 @@ void ExecutorTasks::tryGetTask(ExecutionThreadContext & context)
     }
 
     context.wait(finished);
+}
+
+void ExecutorTasks::enqueueTask(ExecutingGraph::Node * node, size_t thread_num)
+{
+    /// Inelastic Ready processors share `fast_task_queue` with async completions.
+    /// Do not set `has_fast_tasks` here: that flag only means async I/O is waiting,
+    /// and must not disable neighbor-local continuation.
+    if (node->processor->isHighPriority())
+        fast_task_queue.push(node, thread_num);
+    else
+        task_queue.push(node, thread_num);
+    total_tasks_count.fetch_add(1, std::memory_order_relaxed);
 }
 
 ExecutorTasks::SpawnStatus ExecutorTasks::pushTasks(Queue & queue, Queue & async_queue, ExecutionThreadContext & context)
@@ -175,13 +191,14 @@ ExecutorTasks::SpawnStatus ExecutorTasks::pushTasks(Queue & queue, Queue & async
         {
             auto [fd, events] = async_queue.front()->processor->scheduleForEvent();
             async_task_queue.addTask(context.thread_number, async_queue.front(), fd, events);
+            total_tasks_count.fetch_add(1, std::memory_order_relaxed);
             async_queue.pop();
         }
 #endif
 
         while (!queue.empty() && !finished)
         {
-            task_queue.push(queue.front(), context.thread_number);
+            enqueueTask(queue.front(), context.thread_number);
             queue.pop();
         }
 
@@ -226,6 +243,7 @@ void ExecutorTasks::fill(Queue & queue, [[maybe_unused]] Queue & async_queue)
     {
         auto [fd, events] = async_queue.front()->processor->scheduleForEvent();
         async_task_queue.addTask(next_thread, async_queue.front(), fd, events);
+        total_tasks_count.fetch_add(1, std::memory_order_relaxed);
         async_queue.pop();
 
         ++next_thread;
@@ -239,7 +257,7 @@ void ExecutorTasks::fill(Queue & queue, [[maybe_unused]] Queue & async_queue)
 
     while (!queue.empty())
     {
-        task_queue.push(queue.front(), next_thread);
+        enqueueTask(queue.front(), next_thread);
         queue.pop();
 
         ++next_thread;
@@ -291,11 +309,11 @@ void ExecutorTasks::preempt(size_t slot_id)
     --total_slots;
 
     /// We should make sure that preempted thread has no local task inside context.
-    /// It is allowed to have tasks in `task_queue` or `fast_task_queue` because they can be stealed by other threads.
+    /// It is allowed to have tasks in the shared queues because they can be stolen by other threads.
     auto & context = executor_contexts[slot_id];
     if (auto * task = context->popTask())
     {
-        task_queue.push(task, slot_id);
+        enqueueTask(task, slot_id);
         /// Wake up at least one thread to avoid deadlocks (all other threads maybe idle)
         tryWakeUpAnyOtherThreadWithTasks(*context, lock); // this releases the lock if it wakes up a thread
     }
@@ -324,6 +342,7 @@ void ExecutorTasks::processAsyncTasks()
             auto * node = static_cast<ExecutingGraph::Node *>(task.data);
             node->processor->onAsyncJobReady();
 
+            /// Task is moved from async_task_queue to fast_task_queue: net zero for the total counter.
             if (fast_task_queue.empty())
                 has_fast_tasks = true;
             fast_task_queue.push(node, task.thread_num);
@@ -369,6 +388,7 @@ String ExecutorTasks::dump()
     buffer << "  fast_task_queue size: " << fast_task_queue.size() << "\n";
     buffer << "  async_task_queue size: " << async_task_queue.size() << "\n";
     buffer << "  threads_queue size: " << threads_queue.size() << "\n";
+    buffer << "  total_tasks_count (approx): " << total_tasks_count.load(std::memory_order_relaxed) << "\n";
 
     return buffer.str();
 }
