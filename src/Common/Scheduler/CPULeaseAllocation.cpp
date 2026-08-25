@@ -1,7 +1,5 @@
 #include <Common/Scheduler/CPULeaseAllocation.h>
-#include <Common/Scheduler/ISchedulerPriorityQueue.h>
 #include <Common/Scheduler/ISchedulerQueue.h>
-#include <Common/Scheduler/Nodes/MultiLevelFeedbackQueue.h>
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
 #include <Common/CurrentThread.h>
@@ -40,6 +38,7 @@ namespace ProfileEvents
     extern const Event ConcurrencyControlPreemptions;
     extern const Event ConcurrencyControlUpscales;
     extern const Event ConcurrencyControlDownscales;
+    extern const Event ConcurrencyControlLeaseConsumedNanoseconds;
 }
 
 namespace CurrentMetrics
@@ -142,18 +141,9 @@ void CPULeaseAllocation::RequestChain::granted()
         head = requests.begin();
 }
 
-CPULeaseAllocation::RequestChain::EnqueueResult CPULeaseAllocation::RequestChain::enqueue(
-    ResourceCost cost,
-    ResourceCost requested_ns_,
-    Priority priority,
-    bool throttle_non_master)
+bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost requested_ns_)
 {
     chassert(!enqueued);
-
-    // Do not throttle the master-slot request: it must keep progressing even when
-    // worker parallelism is capped by the dynamic tasks-based limit.
-    if (throttle_non_master && !request_master_slot)
-        return EnqueueResult::Throttled;
 
     head->reset(cost);
     head->is_master_slot = std::exchange(request_master_slot, false);
@@ -163,35 +153,16 @@ CPULeaseAllocation::RequestChain::EnqueueResult CPULeaseAllocation::RequestChain
     {
         head->is_noncompeting = false;
         // We do not use enqueueRequestUsingBudget() because it redistributes resource between requests in the queue (which might be from different queries).
-        // Instead we do budgeting for every query independently for better fairness.
-        // All queues created via UnifiedSchedulerNode are MultiLevelFeedbackQueue, so the downcast
-        // is expected to always succeed. The chassert guards against someone later wiring a
-        // non-priority queue here.
-        auto * pqueue = dynamic_cast<ISchedulerPriorityQueue *>(queue);
-        chassert(pqueue);
-        pqueue->enqueueRequest(&*head, priority);
+        // Instead we do budgeting for every query independently for better fairness
+        queue->enqueueRequest(&*head);
         enqueued = true;
-        return EnqueueResult::Enqueued; // Request is enqueued to the scheduler queue, we will wait for it to be granted
+        return true; // Request is enqueued to the scheduler queue, we will wait for it to be granted
     }
     else // noncompeting slot - provide immediately for free
     {
         head->is_noncompeting = true;
-        return EnqueueResult::NonCompeting; // No need to enqueue, we will grant it immediately
+        return false; // No need to enqueue, we will grant it immediately
     }
-}
-
-void CPULeaseAllocation::RequestChain::reprioritize(Priority priority)
-{
-    if (!enqueued)
-        return; // Nothing is waiting in the scheduler queue, the level will be picked at the next enqueue().
-
-    // The currently enqueued request is `&*head` (head is advanced only on grant). It lives in
-    // the master or worker queue depending on its slot kind. Move it in place to the new level.
-    auto * queue = head->is_master_slot ? master_link.queue : worker_link.queue;
-    chassert(queue);
-    auto * pqueue = dynamic_cast<ISchedulerPriorityQueue *>(queue);
-    chassert(pqueue);
-    pqueue->reprioritizeRequest(&*head, priority);
 }
 
 void CPULeaseAllocation::RequestChain::cancel(std::unique_lock<std::mutex> & lock)
@@ -256,6 +227,7 @@ void CPULeaseAllocation::free()
     if (shutdown)
         return;
 
+    wait_counters->incrementNoTrace(ProfileEvents::ConcurrencyControlLeaseConsumedNanoseconds, static_cast<ProfileEvents::Count>(consumed_ns));
     shutdown = true;
     acquirable.store(false, std::memory_order_relaxed);
     wait_timer.reset();
@@ -621,83 +593,24 @@ void CPULeaseAllocation::consume(std::unique_lock<std::mutex> & lock, ResourceCo
             if (!schedule(lock))
                 grantImpl(lock);
         }
-        else
-        {
-            // A request is already enqueued, but `allocated` just dropped. That may move the query
-            // into a lower (higher-priority) parallelism layer, so re-bucket the pending request in
-            // place to keep parallelism leveling correct (promotion across a layer boundary).
-            requests.reprioritize(computeRequestPriority());
-        }
         // NOTE: we do not finish more than one request per one report to avoid stalling the pipeline for reports larger than quantum
     }
 }
 
-size_t CPULeaseAllocation::computeCap() const
-{
-    /// Upper bound on in-flight CPU slot requests.
-    /// The hard cap is `max_threads`. If the pipeline exposes its number of ready tasks,
-    /// we additionally clamp to `max(1, running_count + tasks / 3)` to avoid over-provisioning
-    /// CPU quanta for queries that cannot keep `max_threads` threads busy (e.g. blocked by a
-    /// pipeline breaker). Rationale for each term:
-    ///  - `running_count` keeps enough in-flight quanta to cover every currently running thread
-    ///    so consumption does not starve them;
-    ///  - `tasks / 3` adds headroom proportional to the amount of parallelizable work available;
-    ///  - the `max(..., 1)` floor guarantees progress at construction time (pipeline queues are
-    ///    empty and no thread is running yet, so without the floor the first request would be
-    ///    refused) and keeps at least one request in flight so `consume()` can re-evaluate the
-    ///    cap as new tasks appear.
-    size_t cap = max_threads;
-    if (settings.get_tasks_count)
-    {
-        size_t tasks_count = settings.get_tasks_count() + threads.running_count;
-        cap = std::max<size_t>(std::min<size_t>(max_threads, tasks_count), 2);
-    }
-    return cap;
-}
-
-Priority CPULeaseAllocation::computeRequestPriority() const
-{
-    /// Number of allocated slots that fit in one parallelism layer. A query gets `kLevelingThreads`
-    /// slots at top priority (layer 0), the next `kLevelingThreads` at the next layer, and so on.
-    static constexpr size_t kLevelingThreads = 8;
-    static_assert(kLevelingThreads > 0, "kLevelingThreads must be positive to avoid division by zero");
-
-    Priority priority{};
-
-    /// Parallelism leveling: a query with fewer allocated slots sits in a lower (higher-priority)
-    /// layer and therefore strictly outranks a query that already runs more threads. Very wide
-    /// queries are clamped to the last layer.
-    size_t layer = std::min<size_t>(allocated / kLevelingThreads, MultiLevelFeedbackQueue::kNumLayers - 1);
-
-    /// Within a layer, the sub-band is picked from `requested_ns` (cumulative consumed + outstanding
-    /// granted quantum budget), so a query that has used less CPU sits in a higher (lower-index) band.
-    /// The same thresholds are reused identically in every layer.
-    Priority::Value band = MultiLevelFeedbackQueue::pickCpuBand(requested_ns);
-
-    priority.value = static_cast<Priority::Value>(layer * MultiLevelFeedbackQueue::kLayerWidth) + band;
-    return priority;
-}
-
 bool CPULeaseAllocation::schedule(std::unique_lock<std::mutex> &)
 {
-    size_t cap = computeCap();
     if (allocated == max_threads || shutdown)
         return true;
 
-    Priority priority = computeRequestPriority();
-
     ResourceCost cost = settings.quantum_ns + std::max<ResourceCost>(0, consumed_ns - requested_ns);
     requested_ns += cost;
-    const auto enqueue_result = requests.enqueue(cost, requested_ns, priority, cap < allocated);
-    if (enqueue_result == RequestChain::EnqueueResult::Enqueued)
+    if (requests.enqueue(cost, requested_ns))
     {
         scheduled_increment.add();
         wait_timer.emplace(wait_counters->timer(ProfileEvents::ConcurrencyControlWaitMicroseconds));
         LOG_EVENT(E);
         return true;
     }
-    if (enqueue_result == RequestChain::EnqueueResult::Throttled)
-        return true;
     return false; // Request is noncompeting and should be granted immediately
 }
 
