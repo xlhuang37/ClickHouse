@@ -38,7 +38,6 @@ namespace ProfileEvents
     extern const Event ConcurrencyControlPreemptions;
     extern const Event ConcurrencyControlUpscales;
     extern const Event ConcurrencyControlDownscales;
-    extern const Event ConcurrencyControlLeaseConsumedNanoseconds;
 }
 
 namespace CurrentMetrics
@@ -227,7 +226,6 @@ void CPULeaseAllocation::free()
     if (shutdown)
         return;
 
-    wait_counters->incrementNoTrace(ProfileEvents::ConcurrencyControlLeaseConsumedNanoseconds, static_cast<ProfileEvents::Count>(consumed_ns));
     shutdown = true;
     acquirable.store(false, std::memory_order_relaxed);
     wait_timer.reset();
