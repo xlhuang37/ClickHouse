@@ -115,6 +115,13 @@ ExecutingGraph::UpdateNodeStatus ExecutingGraph::expandPipeline(boost::container
         return UpdateNodeStatus::Exception;
     }
 
+    const bool inherit_high_priority = cur_node.processor->isHighPriority() || new_processors.size() == 1;
+    for (auto & processor : new_processors)
+    {
+        if (inherit_high_priority || processor->getInputs().size() > 1)
+            processor->setHighPriority();
+    }
+
     {
         std::lock_guard guard(processors_mutex);
 

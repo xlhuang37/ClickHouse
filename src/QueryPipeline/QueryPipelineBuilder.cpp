@@ -312,6 +312,7 @@ QueryPipelineBuilderPtr QueryPipelineBuilder::mergePipelines(
     if (collected_processors)
         collected_processors->emplace_back(transform);
 
+    transform->setHighPriority();
     left->pipe.output_ports.front() = &transform->getOutputs().front();
     left->pipe.processors->emplace_back(transform);
 
@@ -391,6 +392,8 @@ std::unique_ptr<QueryPipelineBuilder> QueryPipelineBuilder::joinPipelinesYShaped
         if (collected_processors)
             collected_processors->emplace_back(joining);
 
+        if (num_streams <= 1)
+            joining->setHighPriority();
         left->pipe.processors->emplace_back(std::move(joining));
     }
 
@@ -522,6 +525,7 @@ std::unique_ptr<QueryPipelineBuilder> QueryPipelineBuilder::joinPipelinesRightLe
 
         if (collected_processors)
             collected_processors->emplace_back(delayed_root);
+        delayed_root->setHighPriority();
         left->pipe.processors->emplace_back(delayed_root);
 
         for (auto & outport : delayed_root->getOutputs())
@@ -546,6 +550,8 @@ std::unique_ptr<QueryPipelineBuilder> QueryPipelineBuilder::joinPipelinesRightLe
             auto squashing = std::make_shared<SimpleSquashingChunksTransform>(left->getSharedHeader(), min_block_size_rows, min_block_size_bytes);
             connect(*left_port, squashing->getInputs().front());
             left_port = &squashing->getOutputPort();
+            if (num_streams <= 1)
+                squashing->setHighPriority();
             left->pipe.processors->emplace_back(std::move(squashing));
         }
 
@@ -571,6 +577,8 @@ std::unique_ptr<QueryPipelineBuilder> QueryPipelineBuilder::joinPipelinesRightLe
 
             if (collected_processors)
                 collected_processors->emplace_back(delayed);
+            if (num_streams <= 1)
+                delayed->setHighPriority();
             left->pipe.processors->emplace_back(std::move(delayed));
         }
         else if (use_parallel_non_joined)
@@ -584,6 +592,8 @@ std::unique_ptr<QueryPipelineBuilder> QueryPipelineBuilder::joinPipelinesRightLe
 
             if (collected_processors)
                 collected_processors->emplace_back(non_joined);
+            if (num_streams <= 1)
+                non_joined->setHighPriority();
             left->pipe.processors->emplace_back(std::move(non_joined));
         }
         else
@@ -597,6 +607,8 @@ std::unique_ptr<QueryPipelineBuilder> QueryPipelineBuilder::joinPipelinesRightLe
         if (collected_processors)
             collected_processors->emplace_back(joining);
 
+        if (num_streams <= 1)
+            joining->setHighPriority();
         left->pipe.processors->emplace_back(std::move(joining));
     }
 
@@ -611,6 +623,7 @@ std::unique_ptr<QueryPipelineBuilder> QueryPipelineBuilder::joinPipelinesRightLe
         auto delayed_processor = std::make_shared<DelayedPortsProcessor>(output_header, 2 * num_streams, delayed_ports_numbers);
         if (collected_processors)
             collected_processors->emplace_back(delayed_processor);
+        delayed_processor->setHighPriority();
         left->pipe.processors->emplace_back(delayed_processor);
 
         // Connect @delayed_processor ports with inputs (JoiningTransforms & DelayedJoinedBlocksTransforms) / pipe outputs
