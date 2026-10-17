@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <cmath>
 #include <cstdlib>
 #include <csignal>
 #include <iostream>
@@ -12,6 +13,7 @@
 #include <Common/Config/parseConnectionCredentials.h>
 #include <Common/Stopwatch.h>
 #include <Common/ThreadPool.h>
+#include <base/sleep.h>
 #include <IO/SharedThreadPools.h>
 #include <Common/scope_guard_safe.h>
 #include <AggregateFunctions/ReservoirSampler.h>
@@ -45,7 +47,10 @@
 #include <Parsers/parseQuery.h>
 
 /** A tool for evaluating ClickHouse performance.
-  * The tool emulates a case with fixed amount of simultaneously executing queries.
+  * In the closed system mode (default), the tool emulates a case with fixed amount of simultaneously executing queries:
+  * a new query is sent only after a previous one has finished.
+  * In the open system mode, queries arrive according to a Poisson process with a given rate, independently of
+  * how fast the server answers them, and are executed over a fixed number of connections.
   */
 
 namespace CurrentMetrics
@@ -76,11 +81,18 @@ enum class QueriesFormat
     Script,
 };
 
+enum class BenchmarkMode
+{
+    Closed,
+    Open,
+};
+
 namespace ErrorCodes
 {
     extern const int BAD_ARGUMENTS;
     extern const int CANNOT_BLOCK_SIGNAL;
     extern const int EMPTY_DATA_PASSED;
+    extern const int LOGICAL_ERROR;
     extern const int UNRECOGNIZED_ARGUMENTS;
 }
 
@@ -92,6 +104,50 @@ static QueriesFormat parseQueriesFormat(const std::string & value)
         return QueriesFormat::Script;
     throw Exception(ErrorCodes::BAD_ARGUMENTS,
         "Unknown value for --queries-format: '{}'. Allowed values: 'tsv', 'script'.", value);
+}
+
+static BenchmarkMode parseBenchmarkMode(const std::string & value)
+{
+    if (value == "closed")
+        return BenchmarkMode::Closed;
+    if (value == "open")
+        return BenchmarkMode::Open;
+    throw Exception(ErrorCodes::BAD_ARGUMENTS,
+        "Unknown value for --mode: '{}'. Allowed values: 'closed', 'open'.", value);
+}
+
+static BenchmarkMode parseAndValidateModeOptions(const boost::program_options::variables_map & options)
+{
+    const BenchmarkMode mode = parseBenchmarkMode(options["mode"].as<std::string>());
+
+    if (mode == BenchmarkMode::Open)
+    {
+        if (!options.contains("rate"))
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Option --rate is required for --mode=open.");
+
+        const double rate = options["rate"].as<double>();
+        if (!std::isfinite(rate) || rate <= 0)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Option --rate must be a positive number, got {}.", rate);
+
+        if (options["connections"].as<unsigned>() == 0)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS, "Option --connections must be positive.");
+
+        if (options["iterations"].as<size_t>() == 0 && options["timelimit"].as<double>() <= 0)
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Option --mode=open requires --iterations or --timelimit to bound the arrival schedule.");
+
+        if (!options["concurrency"].defaulted() || !options["max_concurrency"].defaulted())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Options --concurrency and --max_concurrency are not supported with --mode=open, use --connections instead.");
+    }
+    else
+    {
+        if (options.contains("rate") || !options["connections"].defaulted())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "Options --rate and --connections are only supported with --mode=open.");
+    }
+
+    return mode;
 }
 
 class Benchmark : public Poco::Util::Application
@@ -117,12 +173,13 @@ public:
         }),
         connection_name(options.contains("connection") ? std::make_optional(options["connection"].as<std::string>()) : std::nullopt),
         round_robin(options.contains("roundrobin")),
-        concurrency(options["concurrency"].as<unsigned>()),
-        max_concurrency(std::max(concurrency, options["max_concurrency"].as<unsigned>())),
+        mode(parseAndValidateModeOptions(options)),
+        rate(options.contains("rate") ? options["rate"].as<double>() : 0),
+        concurrency(mode == BenchmarkMode::Open ? options["connections"].as<unsigned>() : options["concurrency"].as<unsigned>()),
+        max_concurrency(mode == BenchmarkMode::Open ? concurrency : std::max(concurrency, options["max_concurrency"].as<unsigned>())),
         threads(concurrency),
         delay(options["delay"].as<double>()),
         precise(options.contains("precise")),
-        queue(max_concurrency),
         randomize(options.contains("randomize")),
         cumulative(options.contains("cumulative")),
         max_iterations(options["iterations"].as<size_t>()),
@@ -223,7 +280,10 @@ public:
         try
         {
             readQueries();
-            runBenchmark();
+            if (mode == BenchmarkMode::Open)
+                runOpenBenchmark();
+            else
+                runBenchmark();
             return 0;
         }
         catch (...)
@@ -256,6 +316,10 @@ private:
     std::optional<String> connection_name;
 
     bool round_robin;
+    BenchmarkMode mode;
+    /// Arrival rate (queries per second) of the Poisson process in the open system mode.
+    double rate;
+    /// In the open system mode, all three are equal to the number of connections.
     unsigned concurrency;
     unsigned max_concurrency;
     unsigned threads;
@@ -266,8 +330,24 @@ private:
     using Queries = std::vector<Query>;
     Queries queries;
 
-    using Queue = ConcurrentBoundedQueue<Query>;
-    Queue queue;
+    struct QueuedQuery
+    {
+        size_t query_index = 0;
+        /// Time of the arrival in the open system mode (`clock_gettime_ns` with the `Stopwatch` clock), 0 in the closed system mode.
+        UInt64 scheduled_ns = 0;
+    };
+
+    using Queue = ConcurrentBoundedQueue<QueuedQuery>;
+    /// Created when the capacity is known: it is bounded by the concurrency in the closed system mode,
+    /// and fits the whole schedule in the open system mode, so that arrivals never wait for free connections.
+    std::optional<Queue> queue;
+
+    struct Arrival
+    {
+        UInt64 offset_ns;
+        size_t query_index;
+    };
+    using Schedule = std::vector<Arrival>;
 
     using ConnectionPoolUniq = std::unique_ptr<ConnectionPool>;
     using ConnectionPoolUniqs = std::vector<ConnectionPoolUniq>;
@@ -317,6 +397,8 @@ private:
 
         using Sampler = ReservoirSampler<double>;
         Sampler sampler {1 << 16};
+        /// Only in the open system mode: time from the arrival until the query is sent.
+        Sampler queue_wait_sampler {1 << 16};
 
         void addWeighted(size_t read_rows_inc, size_t read_bytes_inc, size_t result_rows_inc, size_t result_bytes_inc, double weight)
         {
@@ -337,6 +419,11 @@ private:
         {
             addWeighted(read_rows_inc, read_bytes_inc, result_rows_inc, result_bytes_inc, 1.0);
             sample(duration);
+        }
+
+        void sampleQueueWait(double queue_wait)
+        {
+            queue_wait_sampler.insert(queue_wait);
         }
     };
 
@@ -521,13 +608,13 @@ private:
     }
 
     /// Try push new query and check cancellation conditions
-    bool tryPushQueryInteractively(const String & query, InterruptListener & interrupt_listener)
+    bool tryPushQueryInteractively(const QueuedQuery & query, InterruptListener & interrupt_listener)
     {
         bool inserted = false;
 
         while (!inserted)
         {
-            inserted = queue.tryPush(query, 100);
+            inserted = queue->tryPush(query, 100);
 
             if (shutdown)
             {
@@ -614,6 +701,7 @@ private:
         pcg64 generator(randomSeed());
         std::uniform_int_distribution<size_t> distribution(0, queries.size() - 1);
 
+        queue.emplace(max_concurrency);
         startNextInterval(true);
 
         try
@@ -635,7 +723,7 @@ private:
         {
             size_t query_index = randomize ? distribution(generator) : i % queries.size();
 
-            if (!tryPushQueryInteractively(queries[query_index], interrupt_listener))
+            if (!tryPushQueryInteractively(QueuedQuery{.query_index = query_index}, interrupt_listener))
             {
                 shutdown = true;
                 break;
@@ -651,10 +739,140 @@ private:
         report(total_stats, total_watch.elapsedSeconds());
     }
 
+    /// Arrivals of a Poisson process: exponentially distributed inter-arrival times with the mean 1 / rate,
+    /// each arrival picks one of the queries with equal probability.
+    Schedule generateSchedule() const
+    {
+        pcg64 generator(randomSeed());
+        std::exponential_distribution<double> interarrival_distribution(rate);
+        std::uniform_int_distribution<size_t> query_distribution(0, queries.size() - 1);
+
+        Schedule schedule;
+        double offset_seconds = 0;
+        while (!max_iterations || schedule.size() < max_iterations)
+        {
+            offset_seconds += interarrival_distribution(generator);
+            if (max_time > 0 && offset_seconds >= max_time)
+                break;
+
+            schedule.push_back(Arrival{
+                .offset_ns = static_cast<UInt64>(offset_seconds * 1e9),
+                .query_index = query_distribution(generator)});
+        }
+
+        return schedule;
+    }
+
+    /// Waits until the time of the next arrival, while handling interruptions and intermediate reports.
+    /// Returns false if the launch of queries has to be stopped.
+    bool waitForArrival(UInt64 scheduled_ns, InterruptListener & interrupt_listener)
+    {
+        /// Upper bound of a single sleep, so that SIGINT and errors in workers are noticed in time.
+        static constexpr UInt64 max_sleep_ns = 100'000'000;
+
+        while (true)
+        {
+            if (shutdown)
+                return false;
+
+            if (interrupt_listener.check())
+            {
+                std::cout << "Stopping launch of queries. SIGINT received.\n";
+                return false;
+            }
+
+            if (delay > 0 && delay_watch.elapsedSeconds() > delay)
+                startNextInterval();
+
+            const UInt64 now_ns = clock_gettime_ns();
+            if (now_ns >= scheduled_ns)
+                return true;
+
+            sleepForNanoseconds(std::min(scheduled_ns - now_ns, max_sleep_ns));
+        }
+    }
+
+    void runOpenBenchmark()
+    {
+        const Schedule schedule = generateSchedule();
+        if (schedule.empty())
+            throw Exception(ErrorCodes::BAD_ARGUMENTS,
+                "No queries arrive within the time limit of {} seconds at the rate of {} queries per second, "
+                "increase --rate or --timelimit.", max_time, rate);
+
+        /// Workers stop after all arrivals of the schedule are executed.
+        max_iterations = schedule.size();
+
+        {
+            std::lock_guard lock(mutex);
+            log << "Generated a schedule of " << schedule.size() << " arrivals over "
+                << fmt::format("{:.3f}", static_cast<double>(schedule.back().offset_ns) / 1e9) << " sec. "
+                << "with the rate of " << rate << " queries per second, "
+                << "executing them over " << concurrency << " connections.\n" << flush;
+        }
+
+        queue.emplace(schedule.size());
+        startNextInterval(true);
+
+        try
+        {
+            for (size_t i = 0; i < concurrency; ++i)
+                pool.scheduleOrThrowOnError([this]() mutable { thread(); });
+        }
+        catch (...)
+        {
+            shutdown = true;
+            pool.wait();
+            throw;
+        }
+
+        InterruptListener interrupt_listener;
+
+        size_t dispatched = 0;
+        UInt64 max_dispatch_lag_ns = 0;
+        const UInt64 start_ns = clock_gettime_ns();
+
+        for (const auto & arrival : schedule)
+        {
+            const UInt64 scheduled_ns = start_ns + arrival.offset_ns;
+            if (!waitForArrival(scheduled_ns, interrupt_listener))
+            {
+                shutdown = true;
+                break;
+            }
+
+            max_dispatch_lag_ns = std::max(max_dispatch_lag_ns, clock_gettime_ns() - scheduled_ns);
+
+            if (!queue->push(QueuedQuery{.query_index = arrival.query_index, .scheduled_ns = scheduled_ns}))
+                throw Exception(ErrorCodes::LOGICAL_ERROR, "The queue of queries is unexpectedly finished");
+            ++dispatched;
+        }
+
+        const double dispatch_seconds = static_cast<double>(clock_gettime_ns() - start_ns) / 1e9;
+
+        /// Now we don't block the Ctrl+C signal and second signal will terminate the program without waiting.
+        interrupt_listener.unblock();
+
+        pool.wait();
+        total_watch.stop();
+
+        {
+            std::lock_guard lock(mutex);
+            log << "\nDispatched " << dispatched << " of " << schedule.size() << " arrivals in "
+                << fmt::format("{:.3f}", dispatch_seconds) << " sec. "
+                << "(arrival rate: " << fmt::format("{:.3f}", static_cast<double>(dispatched) / dispatch_seconds)
+                << " queries per second, requested: " << rate << "), "
+                << "max dispatch lag: " << fmt::format("{:.6f}", static_cast<double>(max_dispatch_lag_ns) / 1e9) << " sec.\n"
+                << flush;
+        }
+
+        report(total_stats, total_watch.elapsedSeconds());
+    }
+
 
     void thread()
     {
-        Query query;
+        QueuedQuery query;
 
         /// Randomly choosing connection index
         pcg64 generator(randomSeed());
@@ -675,7 +893,7 @@ private:
 
             while (!extracted)
             {
-                extracted = queue.tryPop(query, 100);
+                extracted = queue->tryPop(query, 100);
 
                 if (shutdown || (max_iterations && queries_executed == max_iterations))
                     return;
@@ -684,7 +902,7 @@ private:
             const auto connection_index = distribution(generator);
             try
             {
-                execute(query, connection_index);
+                execute(queries[query.query_index], query.scheduled_ns, connection_index);
                 consecutive_errors = 0;
             }
             catch (...)
@@ -714,7 +932,7 @@ private:
         }
     }
 
-    void execute(const Query & query, size_t connection_index)
+    void execute(const Query & query, UInt64 scheduled_ns, size_t connection_index)
     {
         Stopwatch watch;
 
@@ -755,9 +973,23 @@ private:
         executor.finish();
 
         watch.stop();
-        double duration = (display_client_side_time || progress.elapsed_ns == 0)
-            ? watch.elapsedSeconds()
-            : static_cast<double>(progress.elapsed_ns) / 1e9;
+
+        /// In the open system mode, the latency is the response time from the arrival, including the wait for a free connection.
+        /// Measuring it from the start of the execution would hide the queueing under overload (coordinated omission).
+        const bool is_open = mode == BenchmarkMode::Open;
+        double duration = 0;
+        double queue_wait = 0;
+        if (is_open)
+        {
+            duration = static_cast<double>(watch.getEnd() - scheduled_ns) / 1e9;
+            queue_wait = static_cast<double>(watch.getStart() - scheduled_ns) / 1e9;
+        }
+        else
+        {
+            duration = (display_client_side_time || progress.elapsed_ns == 0)
+                ? watch.elapsedSeconds()
+                : static_cast<double>(progress.elapsed_ns) / 1e9;
+        }
         size_t info_index = round_robin ? 0 : connection_index;
 
         if (precise && cur_interval)
@@ -792,15 +1024,21 @@ private:
 
             // Latency goes to the last interval only (our sampler does not support weights)
             interval->stats[info_index]->sample(duration);
+            if (is_open)
+                interval->stats[info_index]->sampleQueueWait(queue_wait);
         }
         else if (!cumulative)
         {
             std::lock_guard lock(interval_mutex);
             interval->stats[info_index]->add(duration, progress.read_rows, progress.read_bytes, info.rows, info.bytes);
+            if (is_open)
+                interval->stats[info_index]->sampleQueueWait(queue_wait);
         }
 
         std::lock_guard lock(mutex);
         total_stats[info_index]->add(duration, progress.read_rows, progress.read_bytes, info.rows, info.bytes);
+        if (is_open)
+            total_stats[info_index]->sampleQueueWait(queue_wait);
         t_test.add(info_index, duration);
     }
 
@@ -860,23 +1098,36 @@ private:
         }
         log << "\n";
 
-        auto print_percentile = [&](double percent) TSA_REQUIRES(mutex)
+        auto print_percentile = [&](double percent, Stats::Sampler Stats::* sampler) TSA_REQUIRES(mutex)
         {
             log << percent << "%\t\t";
             for (const auto & info : infos)
             {
-                log << fmt::format("{:.3f}", info->sampler.quantileNearest(percent / 100.0)) << " sec.\t";
+                log << fmt::format("{:.3f}", ((*info).*sampler).quantileNearest(percent / 100.0)) << " sec.\t";
             }
             log << "\n";
         };
 
-        for (int percent = 0; percent <= 90; percent += 10)
-            print_percentile(percent);
+        auto print_percentiles = [&](Stats::Sampler Stats::* sampler) TSA_REQUIRES(mutex)
+        {
+            for (int percent = 0; percent <= 90; percent += 10)
+                print_percentile(percent, sampler);
 
-        print_percentile(95);
-        print_percentile(99);
-        print_percentile(99.9);
-        print_percentile(99.99);
+            print_percentile(95, sampler);
+            print_percentile(99, sampler);
+            print_percentile(99.9, sampler);
+            print_percentile(99.99, sampler);
+        };
+
+        if (mode == BenchmarkMode::Open)
+            log << "Response time (from the arrival until the result is received):\n";
+        print_percentiles(&Stats::sampler);
+
+        if (mode == BenchmarkMode::Open)
+        {
+            log << "\nQueue wait (from the arrival until the query is sent):\n";
+            print_percentiles(&Stats::queue_wait_sampler);
+        }
 
         log << "\n" << t_test.compareAndReport(confidence).second << "\n";
 
@@ -917,6 +1168,9 @@ int mainEntryClickHouseBenchmark(int argc, char ** argv)
             ("verbose", "Increase output verbosity")
             ("query,q",       value<std::string>()->default_value(""),          "query to execute")
             ("queries-format", value<std::string>()->default_value("tsv"),      "format of queries read from standard input: 'tsv' (default, one tab-escaped query per line) or 'script' (parse the input as a script of multiple queries separated by semicolons)")
+            ("mode",          value<std::string>()->default_value("closed"),    "load model: 'closed' (default, a fixed number of parallel queries, a new query is sent when a previous one finishes) or 'open' (queries arrive as a Poisson process with --rate, independently of the response time, and run over --connections connections)")
+            ("rate",          value<double>(),                                  "arrival rate in queries per second for --mode=open")
+            ("connections",   value<unsigned>()->default_value(32),             "number of connections for --mode=open")
             ("concurrency,c", value<unsigned>()->default_value(1),              "number of parallel queries")
             ("max_concurrency,C", value<unsigned>()->default_value(0),          "gradually increase number of parallel queries up to specified value, making one report for every concurrency level")
             ("delay,d",       value<double>()->default_value(1),                "delay between intermediate reports in seconds (set 0 to disable reports)")
