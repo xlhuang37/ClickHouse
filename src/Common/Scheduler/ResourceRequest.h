@@ -21,6 +21,7 @@ class ISchedulingAlgorithm;
 class FifoAlgorithm;
 class FairAlgorithm;
 class LasAlgorithm;
+class GittinsAlgorithm;
 class PriorityAlgorithm;
 class CPUSlotsAllocation;
 class ResourceSchedulingContext;
@@ -165,6 +166,7 @@ private:
     friend class FifoAlgorithm; // uses `enqueued_hook` for the `fifo` scheduler
     friend class FairAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fair` scheduler
     friend class LasAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `las` scheduler
+    friend class GittinsAlgorithm; // uses `scheduling_hook` + `scheduling.key`
     friend class PriorityAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `priority` scheduler
     friend class RequestQueue;
     friend class CPUSlotsAllocation; // hack for tests only

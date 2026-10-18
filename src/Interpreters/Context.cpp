@@ -2769,6 +2769,7 @@ ResourceManagerPtr Context::getResourceManager() const
 ClassifierPtr Context::getWorkloadClassifier() const
 {
     const auto & query_settings = getSettingsRef();
+    auto process_list_element = getProcessListElementSafe();
     // Pass the query's scheduling settings so the classifier can build this query's scheduling
     // context. `throw_on_unknown_workload` is read here (not under `mutex`) to avoid locking the
     // shared mutex under `mutex`.
@@ -2780,6 +2781,7 @@ ClassifierPtr Context::getWorkloadClassifier() const
         .weight_lowering_cpu_seconds = query_settings[Setting::weight_lowering_cpu_seconds],
         .weight_lowering_io_bytes = query_settings[Setting::weight_lowering_io_bytes],
         .priority = Priority{query_settings[Setting::workload_priority]},
+        .memory_tracker = process_list_element ? process_list_element->getMemoryTracker() : nullptr,
     };
     std::lock_guard lock(mutex);
     // NOTE: Workload cannot be changed after query start, and getWorkloadClassifier() should not be called before proper `workload` is set

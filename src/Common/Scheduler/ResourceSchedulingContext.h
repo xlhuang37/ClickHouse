@@ -9,6 +9,8 @@
 #include <memory>
 
 
+class MemoryTracker;
+
 namespace DB
 {
 
@@ -25,6 +27,10 @@ struct ResourceQueryState
     /// Atomic because `finish()` runs on the consumer thread, the leaf on the scheduler thread. Read
     /// by `las` (level) and `fair` (weight-lowering thresholds).
     std::atomic<Int64> attained_cost{0};
+
+    /// Current query memory, refreshed from the query's MemoryTracker when a Gittins request is
+    /// keyed. Kept in the scheduling state so the policy hot path does not need a query lookup.
+    std::atomic<Int64> memory_usage{0};
 
     /// `fair`-only state (leaf thread only), grouped so the other algorithms don't touch it: SFQ
     /// virtual runtime; a cached effective weight with a one-way latch (`effective_weight` is
@@ -70,7 +76,8 @@ public:
         Float64 weight_lowering_age_seconds_,
         Float64 weight_lowering_cpu_seconds_,
         Float64 weight_lowering_io_bytes_,
-        Priority priority_)
+        Priority priority_,
+        MemoryTracker * memory_tracker_ = nullptr)
         : start_ns(start_ns_)
         // weight <= 0 is meaningless for SFQ (vruntime divides by it) → default 1.0.
         , weight(weight_ > 0 ? weight_ : 1.0)
@@ -81,6 +88,7 @@ public:
         , weight_lowering_cpu_seconds(weight_lowering_cpu_seconds_ > 0 ? weight_lowering_cpu_seconds_ : 0.0)
         , weight_lowering_io_bytes(weight_lowering_io_bytes_ > 0 ? weight_lowering_io_bytes_ : 0.0)
         , priority(priority_)
+        , memory_tracker(memory_tracker_)
     {
     }
 
@@ -92,6 +100,7 @@ public:
     const Float64 weight_lowering_cpu_seconds; /// Attained CPU-seconds threshold (0 = disabled)
     const Float64 weight_lowering_io_bytes; /// Attained IO-bytes threshold (0 = disabled)
     const Priority priority; /// `priority` scheduler order (`workload_priority`): lower = higher, 0 neutral, negatives outrank it
+    MemoryTracker * const memory_tracker; /// Query-level tracker; owned by QueryStatus for this context's lifetime
 
     /// Allocate the per-resource slots (one per attached leaf). Called once by the classifier after
     /// attaching to all resources, before any request is enqueued; never resized, so a `resourceState()`

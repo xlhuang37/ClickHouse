@@ -383,6 +383,35 @@ TEST(RequestQueue, LasRekeysStaleRequestsOnPop)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 9, 2, 3}));
 }
 
+/// Conditional Gittins selects the index distribution from current query memory. At zero attained
+/// service the sub-1-GiB distribution has a higher normalized index than the 1-GiB distribution.
+TEST(RequestQueue, GittinsUsesMemoryDistribution)
+{
+    Fixture f(SchedulerAlgorithm::Gittins, CostUnit::CPUNanosecond);
+    auto * small = f.makeQuery();
+    auto * large = f.makeQuery();
+    small->resourceState(0)->memory_usage.store(0);
+    large->resourceState(0)->memory_usage.store(1LL << 30);
+
+    f.enqueue(2, large);
+    f.enqueue(1, small);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2}));
+}
+
+/// The final table row is the zero-index sentinel. Zero is normalized to the lowest priority level,
+/// with FIFO as the tie-break.
+TEST(RequestQueue, GittinsZeroIndexIsLowestLevel)
+{
+    Fixture f(SchedulerAlgorithm::Gittins, CostUnit::CPUNanosecond);
+    auto * exhausted = f.makeQuery();
+    auto * fresh = f.makeQuery();
+    exhausted->resourceState(0)->attained_cost.store(411'600'000'000LL);
+
+    f.enqueue(2, exhausted);
+    f.enqueue(1, fresh);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2}));
+}
+
 /// priority: strict order by `workload_priority` (lower value = higher precedence; `0` is the neutral default).
 TEST(RequestQueue, PriorityStrictOrder)
 {
@@ -459,7 +488,7 @@ TEST(RequestQueue, SwapThroughAllSchedulersKeepsRequests)
     auto * a = f.makeQuery();
     for (int i = 1; i <= 4; ++i)
         f.enqueue(i, a);
-    for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las, SchedulerAlgorithm::Priority,
+    for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins, SchedulerAlgorithm::Priority,
                       SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
         f.queue->setScheduler(algo);
     auto [len, cost] = f.queue->getQueueLengthAndCost();
@@ -525,7 +554,7 @@ TEST(RequestQueue, LasRekeySeesPendingCorrection)
 /// Cancellation from the middle works for both algorithms; counters update.
 TEST(RequestQueue, CancelFromMiddle)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las})
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins})
     {
         Fixture f(algo);
         auto * a = f.makeQuery();
@@ -543,7 +572,7 @@ TEST(RequestQueue, CancelFromMiddle)
 /// max_waiting_queries is enforced on the total pending count for both algorithms.
 TEST(RequestQueue, MaxWaitingQueries)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las})
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins})
     {
         Fixture f(algo, CostUnit::IOByte, /*max_queued*/ 2);
         auto * a = f.makeQuery();
@@ -683,7 +712,8 @@ TEST(RequestQueue, FairUsesSchedulingCostNotBudgetAdjustedCost)
 /// no longer depends on which algorithm is (or was) active.
 TEST(RequestQueue, AttainedChargedForEveryAlgorithm)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las})
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
+                      SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins})
     {
         Fixture f(algo);
         auto * q = f.makeQuery();

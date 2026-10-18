@@ -4,6 +4,8 @@
 #include <Common/Scheduler/ResourceSchedulingContext.h>
 #include <Common/Scheduler/CostUnit.h>
 #include <Common/Scheduler/Debug.h>
+#include <Common/Scheduler/Nodes/TimeShared/GittinsIndexData.h>
+#include <Common/MemoryTracker.h>
 #include <Common/Stopwatch.h>
 #include <Common/Exception.h>
 #include <Common/BitHelpers.h>
@@ -12,6 +14,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <array>
+#include <cmath>
 #include <exception>
 #include <iterator>
 #include <limits>
@@ -36,6 +40,7 @@ enum class SchedulerAlgorithm
     Fifo, /// First-come-first-served
     Fair, /// Weighted fair queueing (SFQ) with per-query weight lowering
     Las, /// Least-Attained-Service, MLFQ-bucketed (favours short queries; can starve long ones)
+    Gittins, /// Memory-conditional Gittins index, bucketed into normalized powers-of-two levels
     Priority, /// Strict priority by the query's `priority` setting (lower value first; can starve)
 };
 
@@ -47,9 +52,11 @@ inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
         return SchedulerAlgorithm::Fair;
     if (name == "las")
         return SchedulerAlgorithm::Las;
+    if (name == "gittins")
+        return SchedulerAlgorithm::Gittins;
     if (name == "priority")
         return SchedulerAlgorithm::Priority;
-    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las' or 'priority')", name);
+    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins' or 'priority')", name);
 }
 
 /// Pluggable ordering strategy owned by a `RequestQueue`. It owns only the container of pending
@@ -432,6 +439,144 @@ private:
     Set requests;
 };
 
+/// Memory-based conditional Gittins policy. Attained CPU service chooses a 100 ms row and current
+/// per-query memory chooses a distribution column. Raw indices are normalized once at construction:
+/// zero is level 0, the global smallest positive index is level 1, and every doubling adds a level.
+/// Higher levels are served first, FIFO within a level. As in LAS, a queued request is lazily re-keyed
+/// before service so completed CPU quanta and current memory are reflected without mutating set keys.
+class GittinsAlgorithm final : public ISchedulingAlgorithm
+{
+public:
+    explicit GittinsAlgorithm(CostUnit unit_)
+        : unit(unit_)
+    {
+        double min_positive = std::numeric_limits<double>::max();
+        for (const auto & row : gittins_indices)
+            for (double index : row)
+                if (index > 0)
+                    min_positive = std::min(min_positive, index);
+
+        for (size_t attained = 0; attained < gittins_attained_buckets; ++attained)
+        {
+            for (size_t memory = 0; memory < gittins_memory_bands; ++memory)
+            {
+                const double index = gittins_indices[attained][memory];
+                levels[memory][attained] = index == 0
+                    ? 0
+                    : static_cast<UInt8>(1 + std::floor(std::log2(index / min_positive)));
+            }
+        }
+    }
+
+    void push(ResourceRequest * request) override
+    {
+        request->scheduling.key = {-static_cast<double>(levelOf(*request)), next_seq++};
+        requests.insert(*request);
+    }
+
+    ResourceRequest * pop() override
+    {
+        while (!requests.empty())
+        {
+            auto it = requests.begin();
+            ResourceRequest * request = &*it;
+            const double current_key = -static_cast<double>(levelOf(*request));
+            if (current_key != request->scheduling.key.first)
+            {
+                requests.erase(it);
+                request->scheduling.key.first = current_key;
+                requests.insert(*request);
+                continue;
+            }
+            requests.erase(it);
+            return request;
+        }
+        return nullptr;
+    }
+
+    bool erase(ResourceRequest * request) override
+    {
+        if (!request->scheduling_hook.is_linked())
+            return false;
+        requests.erase(requests.iterator_to(*request));
+        return true;
+    }
+
+    ResourceRequest * popWorst() override
+    {
+        if (requests.empty())
+            return nullptr;
+        auto it = std::prev(requests.end());
+        ResourceRequest * request = &*it;
+        requests.erase(it);
+        return request;
+    }
+
+    void pullAll(ResourceRequest::EnqueuedList & out) noexcept override
+    {
+        while (!requests.empty())
+        {
+            ResourceRequest & request = *requests.begin();
+            requests.erase(requests.begin());
+            out.push_back(request);
+        }
+    }
+
+    void reset() noexcept override
+    {
+        chassert(requests.empty());
+        next_seq = 0;
+    }
+
+    bool empty() const override { return requests.empty(); }
+
+private:
+    UInt8 levelOf(ResourceRequest & request) const
+    {
+        auto & state = *request.scheduling.state;
+        Int64 memory_usage = state.memory_usage.load(std::memory_order_relaxed);
+        if (request.scheduling.context && request.scheduling.context->memory_tracker)
+        {
+            memory_usage = std::max<Int64>(0, request.scheduling.context->memory_tracker->get());
+            state.memory_usage.store(memory_usage, std::memory_order_relaxed);
+        }
+
+        const Int64 attained = state.attained_cost.load(std::memory_order_relaxed);
+        size_t attained_bucket = 0;
+        if (unit == CostUnit::CPUNanosecond && attained > 0)
+            attained_bucket = std::min<UInt64>(
+                static_cast<UInt64>(attained) / 100'000'000ULL, gittins_attained_buckets - 1);
+        return levels[memoryBand(memory_usage)][attained_bucket];
+    }
+
+    static size_t memoryBand(Int64 memory_usage)
+    {
+        constexpr UInt64 gib = 1ULL << 30;
+        const UInt64 memory = memory_usage > 0 ? static_cast<UInt64>(memory_usage) : 0;
+        if (memory >= 32 * gib) return 6;
+        if (memory >= 16 * gib) return 5;
+        if (memory >= 8 * gib) return 4;
+        if (memory >= 4 * gib) return 3;
+        if (memory >= 2 * gib) return 2;
+        if (memory >= gib) return 1;
+        return 0;
+    }
+
+    struct ByKey
+    {
+        bool operator()(const ResourceRequest & lhs, const ResourceRequest & rhs) const noexcept
+        {
+            return lhs.scheduling.key < rhs.scheduling.key;
+        }
+    };
+    using Set = boost::intrusive::set<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByKey>>;
+
+    const CostUnit unit;
+    std::array<std::array<UInt8, gittins_attained_buckets>, gittins_memory_bands> levels{};
+    UInt64 next_seq = 0;
+    Set requests;
+};
+
 /// `priority` — strict priority by the query's `workload_priority` setting. Lower value = higher
 /// precedence, served first; the default `0` is the neutral baseline, a negative value raises the
 /// query above it and a positive value lowers it. Ties (equal priority) fall back to FIFO by
@@ -540,6 +685,7 @@ public:
         : ISchedulerQueue(event_queue_, info_)
         , fair_algorithm(unit_)
         , las_algorithm(unit_)
+        , gittins_algorithm(unit_)
         , max_queued(max_queued_)
         , algorithm(algorithm_)
         , algo(&algorithmFor(algorithm_))
@@ -747,6 +893,7 @@ private:
             case SchedulerAlgorithm::Fifo: return fifo_algorithm;
             case SchedulerAlgorithm::Fair: return fair_algorithm;
             case SchedulerAlgorithm::Las: return las_algorithm;
+            case SchedulerAlgorithm::Gittins: return gittins_algorithm;
             case SchedulerAlgorithm::Priority: return priority_algorithm;
         }
         UNREACHABLE();
@@ -781,6 +928,7 @@ private:
     FifoAlgorithm fifo_algorithm;
     FairAlgorithm fair_algorithm;
     LasAlgorithm las_algorithm;
+    GittinsAlgorithm gittins_algorithm;
     PriorityAlgorithm priority_algorithm;
     Int64 max_queued;
     SchedulerAlgorithm algorithm;

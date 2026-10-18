@@ -11,6 +11,8 @@
 #include <memory>
 #include <functional>
 
+class MemoryTracker;
+
 namespace DB
 {
 
@@ -29,6 +31,7 @@ struct ClassifierSettings
     Float64 weight_lowering_cpu_seconds = 0.0;
     Float64 weight_lowering_io_bytes = 0.0;
     Priority priority;
+    MemoryTracker * memory_tracker = nullptr;
 };
 
 /*
