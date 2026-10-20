@@ -1,0 +1,20 @@
+iterations
+Queries executed: 30 
+Dispatched 30 of 30 arrivals
+Response time (from the arrival until the result is received):
+Queue wait (from the arrival until the query is sent):
+30	1	1
+timelimit
+1
+1
+errors
+1
+1
+1
+1
+1
+1
+1
+1
+1
+1

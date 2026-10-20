@@ -45,15 +45,18 @@ clickhouse-benchmark [keys] < queries_file;
 - `--query_id=ID` — Query Id.
 - `--query_id_prefix=ID_PREFIX` — Query Id Prefix.
 - `--queries-format=FORMAT` — Format of queries read from standard input. Possible values: `tsv` (default, one tab-escaped query per line) and `script` (parse the input as a script of multiple queries separated by semicolons). Limitation of `script`: `INSERT ... FORMAT` queries must be on a single line.
-- `-c N`, `--concurrency=N` — Number of queries that `clickhouse-benchmark` sends simultaneously. Default value: 1.
-- `-C N`, `--max_concurrency=N` — Gradually increases number of parallel queries up to specified value, making one report for every concurrency level.
+- `--mode=MODE` — Load model. Possible values: `closed` (default, a fixed number of parallel queries, a new query is sent when a previous one finishes) and `open` (queries arrive at random moments with a given rate, independently of how fast the server answers). See [Open system mode](#clickhouse-benchmark-open-system-mode).
+- `--rate=N` — Arrival rate in queries per second for `--mode=open`. Required in this mode.
+- `--connections=N` — Number of connections for `--mode=open`. Default value: 32.
+- `-c N`, `--concurrency=N` — Number of queries that `clickhouse-benchmark` sends simultaneously. Default value: 1. Not supported with `--mode=open`.
+- `-C N`, `--max_concurrency=N` — Gradually increases number of parallel queries up to specified value, making one report for every concurrency level. Not supported with `--mode=open`.
 - `--precise` — Enables precise per-interval reporting with weighted metrics.
 - `-d N`, `--delay=N` — Interval in seconds between intermediate reports (to disable reports set 0). Default value: 1.
 - `-h HOST`, `--host=HOST` — Server host. Default value: `localhost`. For the [comparison mode](#clickhouse-benchmark-comparison-mode) you can use multiple `-h` keys.
-- `-i N`, `--iterations=N` — Total number of queries. Default value: 0 (repeat forever).
-- `-r`, `--randomize` — Random order of queries execution if there is more than one input query.
+- `-i N`, `--iterations=N` — Total number of queries. Default value: 0 (repeat forever). With `--mode=open`, it is the number of arrivals in the schedule.
+- `-r`, `--randomize` — Random order of queries execution if there is more than one input query. With `--mode=open`, queries are always picked randomly.
 - `-s`, `--secure` — Using `TLS` connection.
-- `-t N`, `--timelimit=N` — Time limit in seconds. `clickhouse-benchmark` stops sending queries when the specified time limit is reached. Default value: 0 (time limit disabled).
+- `-t N`, `--timelimit=N` — Time limit in seconds. `clickhouse-benchmark` stops sending queries when the specified time limit is reached. Default value: 0 (time limit disabled). With `--mode=open`, it is the duration of the schedule.
 - `--port=N` — Server port. Default value: 9000. For the [comparison mode](#clickhouse-benchmark-comparison-mode) you can use multiple `--port` keys.
 - `--confidence=N` — Level of confidence for T-test. Possible values: 0 (80%), 1 (90%), 2 (95%), 3 (98%), 4 (99%), 5 (99.5%). Default value: 5. In the [comparison mode](#clickhouse-benchmark-comparison-mode) `clickhouse-benchmark` performs the [Independent two-sample Student's t-test](https://en.wikipedia.org/wiki/Student%27s_t-test#Independent_two-sample_t-test) to determine whether the two distributions aren't different with the selected level of confidence.
 - `--cumulative` — Printing cumulative data instead of data per interval.
@@ -120,6 +123,24 @@ In the report you can find:
   - result MiB/s. How many mebibytes placed by the server to the result of a query per second during a period specified in the `--delay` argument.
 
 - Percentiles of queries execution time.
+
+## Open system mode {#clickhouse-benchmark-open-system-mode}
+
+By default, `clickhouse-benchmark` models a closed system: `--concurrency` clients send queries one after another, and each client sends the next query only after the previous one has finished. When the server slows down, the clients send fewer queries, so the load adapts to the server.
+
+With `--mode=open`, `clickhouse-benchmark` models an open system, where queries arrive independently of how fast the server answers them, as requests from a large number of independent users do:
+
+- Before the run, `clickhouse-benchmark` generates a schedule of arrivals as a Poisson process with the rate of `--rate` queries per second: the intervals between arrivals are random and exponentially distributed with the mean of `1 / rate` seconds. Each arrival picks one of the input queries with equal probability. The schedule ends after `--iterations` arrivals or after `--timelimit` seconds, whichever comes first, and at least one of these options is required.
+- A single dispatcher thread waits until the time of each arrival and hands the query over to one of `--connections` connections.
+- If all connections are busy, the query waits in a queue until a connection becomes free. The dispatcher is never blocked, so the arrivals follow the schedule even when the server is overloaded. After the schedule ends, `clickhouse-benchmark` waits until all queued queries are executed.
+
+In this mode, the reported latency is the response time measured on the client: the time from the scheduled arrival until the result is received, including the time spent in the queue. The report also contains the percentiles of the queue wait (the time from the arrival until the query is sent), the actual arrival rate, and the maximum lag of the dispatcher behind the schedule. When the rate is higher than the server can sustain with the given number of connections, the queue wait keeps growing during the run.
+
+Example:
+
+```bash
+$ clickhouse-benchmark --mode=open --rate=100 --connections=16 --timelimit=60 < queries_file
+```
 
 ## Comparison Mode {#clickhouse-benchmark-comparison-mode}
 
