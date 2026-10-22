@@ -28,7 +28,7 @@ struct ResourceQueryState
     /// by `las` (level) and `fair` (weight-lowering thresholds).
     std::atomic<Int64> attained_cost{0};
 
-    /// Current query memory, refreshed from the query's MemoryTracker when a Gittins request is
+    /// Peak query memory, refreshed from the query's MemoryTracker when a `mem-gittins` request is
     /// keyed. Kept in the scheduling state so the policy hot path does not need a query lookup.
     std::atomic<Int64> memory_usage{0};
 

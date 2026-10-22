@@ -40,7 +40,8 @@ enum class SchedulerAlgorithm
     Fifo, /// First-come-first-served
     Fair, /// Weighted fair queueing (SFQ) with per-query weight lowering
     Las, /// Least-Attained-Service, MLFQ-bucketed (favours short queries; can starve long ones)
-    Gittins, /// Memory-conditional Gittins index, bucketed into normalized powers-of-two levels
+    Gittins, /// Gittins index for the base distribution, bucketed into normalized powers-of-two levels
+    MemGittins, /// Memory-conditional Gittins index, bucketed into normalized powers-of-two levels
     Priority, /// Strict priority by the query's `priority` setting (lower value first; can starve)
 };
 
@@ -54,9 +55,14 @@ inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
         return SchedulerAlgorithm::Las;
     if (name == "gittins")
         return SchedulerAlgorithm::Gittins;
+    if (name == "mem-gittins")
+        return SchedulerAlgorithm::MemGittins;
     if (name == "priority")
         return SchedulerAlgorithm::Priority;
-    throw Exception(ErrorCodes::BAD_ARGUMENTS, "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins' or 'priority')", name);
+    throw Exception(
+        ErrorCodes::BAD_ARGUMENTS,
+        "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins' or 'priority')",
+        name);
 }
 
 /// Pluggable ordering strategy owned by a `RequestQueue`. It owns only the container of pending
@@ -439,16 +445,18 @@ private:
     Set requests;
 };
 
-/// Memory-based conditional Gittins policy. Attained CPU service chooses a 100 ms row and current
-/// per-query memory chooses a distribution column. Raw indices are normalized once at construction:
-/// zero is level 0, the global smallest positive index is level 1, and every doubling adds a level.
-/// Higher levels are served first, FIFO within a level. As in LAS, a queued request is lazily re-keyed
-/// before service so completed CPU quanta and current memory are reflected without mutating set keys.
+/// Gittins policy. Attained CPU service chooses a 100 ms row. The naive policy always uses the base
+/// distribution (memory above 0 GiB); the memory-conditioned policy chooses a distribution column
+/// from peak per-query memory. Raw indices are normalized once at construction: zero is level 0,
+/// the global smallest positive index is level 1, and every doubling adds a level. Higher levels are
+/// served first, FIFO within a level. As in LAS, a queued request is lazily re-keyed before service
+/// so completed CPU quanta and, when applicable, peak memory are reflected without mutating set keys.
 class GittinsAlgorithm final : public ISchedulingAlgorithm
 {
 public:
-    explicit GittinsAlgorithm(CostUnit unit_)
+    explicit GittinsAlgorithm(CostUnit unit_, bool memory_conditioned_)
         : unit(unit_)
+        , memory_conditioned(memory_conditioned_)
     {
         double min_positive = std::numeric_limits<double>::max();
         for (const auto & row : gittins_indices)
@@ -531,14 +539,21 @@ public:
     bool empty() const override { return requests.empty(); }
 
 private:
+    static constexpr size_t base_memory_band = 0;
+
     UInt8 levelOf(ResourceRequest & request) const
     {
         auto & state = *request.scheduling.state;
-        Int64 memory_usage = state.memory_usage.load(std::memory_order_relaxed);
-        if (request.scheduling.context && request.scheduling.context->memory_tracker)
+        size_t memory_band = base_memory_band;
+        if (memory_conditioned)
         {
-            memory_usage = std::max<Int64>(0, request.scheduling.context->memory_tracker->get());
-            state.memory_usage.store(memory_usage, std::memory_order_relaxed);
+            Int64 memory_usage = state.memory_usage.load(std::memory_order_relaxed);
+            if (request.scheduling.context && request.scheduling.context->memory_tracker)
+            {
+                memory_usage = std::max<Int64>(0, request.scheduling.context->memory_tracker->getPeak());
+                state.memory_usage.store(memory_usage, std::memory_order_relaxed);
+            }
+            memory_band = memoryBand(memory_usage);
         }
 
         const Int64 attained = state.attained_cost.load(std::memory_order_relaxed);
@@ -546,7 +561,7 @@ private:
         if (unit == CostUnit::CPUNanosecond && attained > 0)
             attained_bucket = std::min<UInt64>(
                 static_cast<UInt64>(attained) / 100'000'000ULL, gittins_attained_buckets - 1);
-        return levels[memoryBand(memory_usage)][attained_bucket];
+        return levels[memory_band][attained_bucket];
     }
 
     static size_t memoryBand(Int64 memory_usage)
@@ -572,6 +587,7 @@ private:
     using Set = boost::intrusive::set<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByKey>>;
 
     const CostUnit unit;
+    const bool memory_conditioned;
     std::array<std::array<UInt8, gittins_attained_buckets>, gittins_memory_bands> levels{};
     UInt64 next_seq = 0;
     Set requests;
@@ -685,7 +701,8 @@ public:
         : ISchedulerQueue(event_queue_, info_)
         , fair_algorithm(unit_)
         , las_algorithm(unit_)
-        , gittins_algorithm(unit_)
+        , gittins_algorithm(unit_, false)
+        , mem_gittins_algorithm(unit_, true)
         , max_queued(max_queued_)
         , algorithm(algorithm_)
         , algo(&algorithmFor(algorithm_))
@@ -894,6 +911,7 @@ private:
             case SchedulerAlgorithm::Fair: return fair_algorithm;
             case SchedulerAlgorithm::Las: return las_algorithm;
             case SchedulerAlgorithm::Gittins: return gittins_algorithm;
+            case SchedulerAlgorithm::MemGittins: return mem_gittins_algorithm;
             case SchedulerAlgorithm::Priority: return priority_algorithm;
         }
         UNREACHABLE();
@@ -929,6 +947,7 @@ private:
     FairAlgorithm fair_algorithm;
     LasAlgorithm las_algorithm;
     GittinsAlgorithm gittins_algorithm;
+    GittinsAlgorithm mem_gittins_algorithm;
     PriorityAlgorithm priority_algorithm;
     Int64 max_queued;
     SchedulerAlgorithm algorithm;
