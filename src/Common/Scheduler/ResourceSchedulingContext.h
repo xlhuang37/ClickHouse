@@ -102,7 +102,7 @@ public:
     const Float64 weight_lowering_age_seconds; /// Age threshold, seconds (0 = disabled)
     const Float64 weight_lowering_cpu_seconds; /// Attained CPU-seconds threshold (0 = disabled)
     const Float64 weight_lowering_io_bytes; /// Attained IO-bytes threshold (0 = disabled)
-    const Float64 expected_query_runtime; /// Expected runtime in seconds for `srpt` (0 = unknown/high priority)
+    const Float64 expected_query_runtime; /// Expected runtime in microseconds for `srpt` (0 = unknown/high priority)
     const Priority priority; /// `priority` scheduler order (`workload_priority`): lower = higher, 0 neutral, negatives outrank it
     MemoryTracker * const memory_tracker; /// Query-level tracker; owned by QueryStatus for this context's lifetime
 

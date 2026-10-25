@@ -516,8 +516,8 @@ private:
     static double remainingService(const ResourceRequest & request)
     {
         chassert(request.scheduling.context);
-        constexpr double nanoseconds_per_second = 1e9;
-        const double expected = request.scheduling.context->expected_query_runtime * nanoseconds_per_second;
+        constexpr double nanoseconds_per_microsecond = 1e3;
+        const double expected = request.scheduling.context->expected_query_runtime * nanoseconds_per_microsecond;
         const Int64 attained = request.scheduling.state->attained_cost.load(std::memory_order_relaxed);
         return expected - static_cast<double>(attained);
     }

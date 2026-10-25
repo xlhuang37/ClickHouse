@@ -388,9 +388,9 @@ TEST(RequestQueue, LasRekeysStaleRequestsOnPop)
 TEST(RequestQueue, SrptOrdersByExpectedRuntime)
 {
     Fixture f(SchedulerAlgorithm::Srpt, CostUnit::CPUNanosecond);
-    auto * long_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10.0);
-    auto * short_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/2.0);
-    auto * another_short_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/2.0);
+    auto * long_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10'000'000.0);
+    auto * short_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/2'000'000.0);
+    auto * another_short_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/2'000'000.0);
 
     f.enqueue(10, long_query);
     f.enqueue(20, short_query);
@@ -403,7 +403,7 @@ TEST(RequestQueue, SrptOrdersByExpectedRuntime)
 TEST(RequestQueue, SrptUnknownRuntimeHasHighPriority)
 {
     Fixture f(SchedulerAlgorithm::Srpt, CostUnit::CPUNanosecond);
-    auto * estimated = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/0.001);
+    auto * estimated = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/1'000.0);
     auto * unknown = f.makeQuery();
 
     f.enqueue(1, estimated);
@@ -416,8 +416,8 @@ TEST(RequestQueue, SrptUnknownRuntimeHasHighPriority)
 TEST(RequestQueue, SrptRekeysStaleRequestsOnPop)
 {
     Fixture f(SchedulerAlgorithm::Srpt, CostUnit::CPUNanosecond);
-    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10.0);
-    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10.0);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10'000'000.0);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10'000'000.0);
     constexpr ResourceCost one_second = 1'000'000'000;
 
     f.enqueue(1, a, one_second);
@@ -435,8 +435,8 @@ TEST(RequestQueue, SrptRekeysStaleRequestsOnPop)
 TEST(RequestQueue, SrptQueueLimitRefreshesBeforeEviction)
 {
     Fixture f(SchedulerAlgorithm::Srpt, CostUnit::CPUNanosecond);
-    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10.0);
-    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/9.0);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10'000'000.0);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/9'000'000.0);
     auto * a_request = f.enqueue(1, a);
     auto * b_request = f.enqueue(2, b);
 
