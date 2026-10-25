@@ -48,11 +48,12 @@ struct Fixture
 
     ResourceSchedulingContext * makeQuery(
         Float64 weight = 1.0, Float64 factor = 1.0, Float64 age_s = 0, Float64 cpu_s = 0, Float64 io_b = 0,
-        UInt64 start_ns = 0, Int64 priority = 0)
+        UInt64 start_ns = 0, Int64 priority = 0, Float64 expected_runtime = 0)
     {
         if (start_ns == 0)
             start_ns = clock_gettime_ns();
-        contexts.push_back(std::make_shared<ResourceSchedulingContext>(start_ns, weight, factor, age_s, cpu_s, io_b, Priority{priority}));
+        contexts.push_back(
+            std::make_shared<ResourceSchedulingContext>(start_ns, weight, factor, age_s, cpu_s, io_b, expected_runtime, Priority{priority}));
         // Single leaf in this fixture → one per-resource slot, pre-sized like the classifier does.
         contexts.back()->initResourceStates(1);
         return contexts.back().get();
@@ -383,6 +384,69 @@ TEST(RequestQueue, LasRekeysStaleRequestsOnPop)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 9, 2, 3}));
 }
 
+/// srpt: lower expected remaining CPU time is served first, with FIFO for equal keys.
+TEST(RequestQueue, SrptOrdersByExpectedRuntime)
+{
+    Fixture f(SchedulerAlgorithm::Srpt, CostUnit::CPUNanosecond);
+    auto * long_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10.0);
+    auto * short_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/2.0);
+    auto * another_short_query = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/2.0);
+
+    f.enqueue(10, long_query);
+    f.enqueue(20, short_query);
+    f.enqueue(21, another_short_query);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{20, 21, 10}));
+}
+
+/// The default expected runtime of zero means unknown and intentionally sorts before positive
+/// estimates, making experimental opt-in safe for queries whose runtime has not been supplied.
+TEST(RequestQueue, SrptUnknownRuntimeHasHighPriority)
+{
+    Fixture f(SchedulerAlgorithm::Srpt, CostUnit::CPUNanosecond);
+    auto * estimated = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/0.001);
+    auto * unknown = f.makeQuery();
+
+    f.enqueue(1, estimated);
+    f.enqueue(2, unknown);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2, 1}));
+}
+
+/// SRPT keys decrease as service is attained. A pending request from the query that just ran must
+/// move ahead of an equal-estimate query even when its old FIFO sequence placed it behind.
+TEST(RequestQueue, SrptRekeysStaleRequestsOnPop)
+{
+    Fixture f(SchedulerAlgorithm::Srpt, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10.0);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10.0);
+    constexpr ResourceCost one_second = 1'000'000'000;
+
+    f.enqueue(1, a, one_second);
+    f.enqueue(2, b, one_second);
+    f.enqueue(3, a, one_second);
+    auto [first, _] = f.queue->dequeueRequest();
+    ASSERT_TRUE(first);
+    EXPECT_EQ(static_cast<TestRequest *>(first)->id, 1);
+    // A now has 9 seconds remaining while B has 10. Without a full stale-key refresh, B's earlier
+    // sequence number would incorrectly put it before A's second queued request.
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{3, 2}));
+}
+
+/// Eviction also refreshes SRPT keys before selecting the least-preferred request.
+TEST(RequestQueue, SrptQueueLimitRefreshesBeforeEviction)
+{
+    Fixture f(SchedulerAlgorithm::Srpt, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/10.0);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, 0, 0, /*expected_runtime=*/9.0);
+    auto * a_request = f.enqueue(1, a);
+    auto * b_request = f.enqueue(2, b);
+
+    f.addCorrection(a, /*real=*/2'000'000'000, /*estimate=*/0);
+    f.queue->updateQueueLimit(1);
+    EXPECT_EQ(a_request->failed_count, 0);
+    EXPECT_EQ(b_request->failed_count, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1}));
+}
+
 /// Conditional Gittins selects the index distribution from current query memory. At zero attained
 /// service the sub-1-GiB distribution has a higher normalized index than the 1-GiB distribution.
 TEST(RequestQueue, MemGittinsUsesMemoryDistribution)
@@ -499,13 +563,13 @@ static_assert(noexcept(std::declval<RequestQueue &>().setScheduler(SchedulerAlgo
 /// Switching through every algorithm and back again (reusing the instances) keeps the requests in order.
 TEST(RequestQueue, SwapThroughAllSchedulersKeepsRequests)
 {
-    Fixture f(SchedulerAlgorithm::Fifo);
+    Fixture f(SchedulerAlgorithm::Fifo, CostUnit::CPUNanosecond);
     auto * a = f.makeQuery();
     for (int i = 1; i <= 4; ++i)
         f.enqueue(i, a);
     for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins,
-                      SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fifo,
-                      SchedulerAlgorithm::Fair})
+                      SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Srpt,
+                      SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
         f.queue->setScheduler(algo);
     auto [len, cost] = f.queue->getQueueLengthAndCost();
     EXPECT_EQ(len, 4u);
@@ -571,9 +635,9 @@ TEST(RequestQueue, LasRekeySeesPendingCorrection)
 TEST(RequestQueue, CancelFromMiddle)
 {
     for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las,
-                      SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins})
+                      SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
-        Fixture f(algo);
+        Fixture f(algo, algo == SchedulerAlgorithm::Srpt ? CostUnit::CPUNanosecond : CostUnit::IOByte);
         auto * a = f.makeQuery();
         auto * r1 = f.enqueue(1, a);
         auto * r2 = f.enqueue(2, a);
@@ -590,9 +654,12 @@ TEST(RequestQueue, CancelFromMiddle)
 TEST(RequestQueue, MaxWaitingQueries)
 {
     for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las,
-                      SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins})
+                      SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
-        Fixture f(algo, CostUnit::IOByte, /*max_queued*/ 2);
+        Fixture f(
+            algo,
+            algo == SchedulerAlgorithm::Srpt ? CostUnit::CPUNanosecond : CostUnit::IOByte,
+            /*max_queued*/ 2);
         auto * a = f.makeQuery();
         f.enqueue(1, a);
         f.enqueue(2, a);
@@ -634,7 +701,7 @@ TEST(RequestQueue, Purge)
 /// reset() clears the per-request scheduling state so a reused request carries nothing stale.
 TEST(RequestQueue, ResetClearsSchedulingState)
 {
-    auto ctx = std::make_shared<ResourceSchedulingContext>(clock_gettime_ns(), 1.0, 1.0, 0, 0, 0, Priority{});
+    auto ctx = std::make_shared<ResourceSchedulingContext>(clock_gettime_ns(), 1.0, 1.0, 0, 0, 0, 0, Priority{});
     TestRequest r(1, 5);
     r.scheduling.context = ctx.get();
     r.scheduling.key = {42.0, 7};
@@ -671,15 +738,15 @@ TEST(RequestQueue, NodeTypeAndSchedulerSetting)
 /// factor is floored at 0.0. A non-positive base weight falls back to 1.0.
 TEST(RequestQueue, WeightLoweringFactorClamped)
 {
-    ResourceSchedulingContext raised(clock_gettime_ns(), 1.0, 10.0, 0, 0, 0, Priority{});
+    ResourceSchedulingContext raised(clock_gettime_ns(), 1.0, 10.0, 0, 0, 0, 0, Priority{});
     EXPECT_EQ(raised.weight_lowering_factor, 1.0);
-    ResourceSchedulingContext negative(clock_gettime_ns(), 1.0, -5.0, 0, 0, 0, Priority{});
+    ResourceSchedulingContext negative(clock_gettime_ns(), 1.0, -5.0, 0, 0, 0, 0, Priority{});
     EXPECT_EQ(negative.weight_lowering_factor, 0.0);
-    ResourceSchedulingContext normal(clock_gettime_ns(), 1.0, 0.25, 0, 0, 0, Priority{});
+    ResourceSchedulingContext normal(clock_gettime_ns(), 1.0, 0.25, 0, 0, 0, 0, Priority{});
     EXPECT_EQ(normal.weight_lowering_factor, 0.25);
-    ResourceSchedulingContext zero_weight(clock_gettime_ns(), 0.0, 1.0, 0, 0, 0, Priority{});
+    ResourceSchedulingContext zero_weight(clock_gettime_ns(), 0.0, 1.0, 0, 0, 0, 0, Priority{});
     EXPECT_EQ(zero_weight.weight, 1.0);
-    ResourceSchedulingContext negative_weight(clock_gettime_ns(), -3.0, 1.0, 0, 0, 0, Priority{});
+    ResourceSchedulingContext negative_weight(clock_gettime_ns(), -3.0, 1.0, 0, 0, 0, 0, Priority{});
     EXPECT_EQ(negative_weight.weight, 1.0);
 }
 
@@ -687,15 +754,26 @@ TEST(RequestQueue, WeightLoweringThresholdsClampNegativeToDisabled)
 {
     // A negative lowering threshold is meaningless and is clamped to 0 (disabled), rather than
     // stored as-is and only read as disabled by the `> 0` checks in the weight-lowering logic.
-    ResourceSchedulingContext negative(clock_gettime_ns(), 1.0, 0.5, -1.0, -2.0, -3.0, Priority{});
+    ResourceSchedulingContext negative(clock_gettime_ns(), 1.0, 0.5, -1.0, -2.0, -3.0, 0, Priority{});
     EXPECT_EQ(negative.weight_lowering_age_seconds, 0.0);
     EXPECT_EQ(negative.weight_lowering_cpu_seconds, 0.0);
     EXPECT_EQ(negative.weight_lowering_io_bytes, 0.0);
     // Positive thresholds are preserved verbatim.
-    ResourceSchedulingContext positive(clock_gettime_ns(), 1.0, 0.5, 3.0, 4.0, 5.0, Priority{});
+    ResourceSchedulingContext positive(clock_gettime_ns(), 1.0, 0.5, 3.0, 4.0, 5.0, 0, Priority{});
     EXPECT_EQ(positive.weight_lowering_age_seconds, 3.0);
     EXPECT_EQ(positive.weight_lowering_cpu_seconds, 4.0);
     EXPECT_EQ(positive.weight_lowering_io_bytes, 5.0);
+}
+
+TEST(RequestQueue, ExpectedRuntimeNormalizesUnknownValues)
+{
+    ResourceSchedulingContext negative(clock_gettime_ns(), 1.0, 1.0, 0, 0, 0, -1.0, Priority{});
+    ResourceSchedulingContext infinite(
+        clock_gettime_ns(), 1.0, 1.0, 0, 0, 0, std::numeric_limits<Float64>::infinity(), Priority{});
+    ResourceSchedulingContext expected(clock_gettime_ns(), 1.0, 1.0, 0, 0, 0, 2.5, Priority{});
+    EXPECT_EQ(negative.expected_query_runtime, 0.0);
+    EXPECT_EQ(infinite.expected_query_runtime, 0.0);
+    EXPECT_EQ(expected.expected_query_runtime, 2.5);
 }
 
 /// `fair` accounts virtual runtime from `scheduling.cost` (the query's DECLARED cost), not `cost`
@@ -731,9 +809,10 @@ TEST(RequestQueue, FairUsesSchedulingCostNotBudgetAdjustedCost)
 TEST(RequestQueue, AttainedChargedForEveryAlgorithm)
 {
     for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
-                      SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins})
+                      SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins,
+                      SchedulerAlgorithm::Srpt})
     {
-        Fixture f(algo);
+        Fixture f(algo, algo == SchedulerAlgorithm::Srpt ? CostUnit::CPUNanosecond : CostUnit::IOByte);
         auto * q = f.makeQuery();
         f.enqueue(1, q, 42);
         ASSERT_EQ(f.dequeueIds(), (std::vector<int>{1}));

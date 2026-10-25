@@ -4436,6 +4436,20 @@ TEST(SchedulerWorkloadResourceManager, CpuLeafUsesConfiguredSchedulerLikeIO)
     EXPECT_EQ(Traits::schedulerFor(ws, CostUnit::QuerySlot), SchedulerAlgorithm::Fifo);
 }
 
+TEST(SchedulerWorkloadResourceManager, SrptSchedulerIsCpuOnly)
+{
+    using Traits = WorkloadNodeTraits<ITimeSharedNode>;
+
+    WorkloadSettings ws;
+    ASTCreateWorkloadQuery::SettingsChanges changes;
+    changes.emplace_back("scheduler", Field(String("srpt")), "");
+    ws.initFromChanges(changes);
+    EXPECT_EQ(Traits::schedulerFor(ws, CostUnit::CPUNanosecond), SchedulerAlgorithm::Srpt);
+    EXPECT_THROW(Traits::schedulerFor(ws, CostUnit::IOByte), DB::Exception);
+    EXPECT_THROW(Traits::schedulerFor(ws, CostUnit::QuerySlot), DB::Exception);
+    EXPECT_THROW(Traits::schedulerFor(ws, CostUnit::MemoryByte), DB::Exception);
+}
+
 TEST(SchedulerWorkloadResourceManager, WorkloadSettingsMaxConcurrentThreadsRatioToCores)
 {
     const Int64 cores = static_cast<Int64>(getNumberOfCPUCoresToUse());

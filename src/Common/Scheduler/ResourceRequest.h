@@ -23,6 +23,7 @@ class FairAlgorithm;
 class LasAlgorithm;
 class GittinsAlgorithm;
 class PriorityAlgorithm;
+class SrptAlgorithm;
 class CPUSlotsAllocation;
 class ResourceSchedulingContext;
 struct ResourceQueryState;
@@ -70,7 +71,7 @@ public:
     /// This is used for special requests that should not be throttled, e.g. for CPUSlotsAllocation
     bool ignore_throttling = false;
 
-    /// Query-aware scheduling state (`fair` / `las` / `priority`), filled at enqueue by the
+    /// Query-aware scheduling state (`fair` / `las` / `priority` / `srpt`), filled at enqueue by the
     /// `RequestQueue` schedulers and reset by `reset()`.
     struct
     {
@@ -89,14 +90,14 @@ public:
 
         /// Non-owning pointer to this query's per-resource state for the target leaf: the classifier
         /// resolved it (one slot per attached leaf) and stamped it onto the link; copied here at
-        /// enqueue. Lets `fair`/`las` reach the per-resource state with a single dereference — no map
+        /// enqueue. Lets query-aware schedulers reach the per-resource state with a single dereference — no map
         /// or lookup. Same lifetime as `context`. Defaults to the shared fallback state (never null),
         /// so the schedulers dereference it unconditionally; a classifier link overwrites it.
         ResourceQueryState * state = &default_scheduling_state;
 
-        /// Ordering key for `fair` / `las`, constant while the request is in the intrusive ordered
-        /// set. `.first` is the virtual runtime (`fair`) or MLFQ level (`las`); `.second` a monotonic
-        /// sequence number for a stable FIFO tie-break (also used by `priority`).
+        /// Ordering key for schedulers backed by the intrusive ordered set. `.first` is the virtual
+        /// runtime (`fair`), MLFQ level (`las`), or remaining service (`srpt`); `.second` is a
+        /// monotonic sequence number for a stable FIFO tie-break (also used by `priority`).
         std::pair<double, UInt64> key{0.0, 0};
 
         /// Ordering key for the `priority` scheduler (lower value first, then `key.second` for FIFO).
@@ -168,6 +169,7 @@ private:
     friend class LasAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `las` scheduler
     friend class GittinsAlgorithm; // uses `scheduling_hook` + `scheduling.key`
     friend class PriorityAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `priority` scheduler
+    friend class SrptAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `srpt` scheduler
     friend class RequestQueue;
     friend class CPUSlotsAllocation; // hack for tests only
 
@@ -177,8 +179,8 @@ private:
     using EnqueuedHook = boost::intrusive::member_hook<ResourceRequest, boost::intrusive::list_member_hook<>, &ResourceRequest::enqueued_hook>;
     using EnqueuedList = boost::intrusive::list<ResourceRequest, EnqueuedHook>;
 
-    /// For an intrusive ordered set of enqueued requests (the `fair` and `las` schedulers).
-    /// A request is in at most one of the two containers (list or set) at a time.
+    /// For an intrusive ordered set of enqueued requests (all schedulers except `fifo`).
+    /// A request is in at most one container (list or set) at a time.
     /// NOTE: Can only be accessed under the owning queue's mutex.
     boost::intrusive::set_member_hook<> scheduling_hook;
     using SchedulingHook = boost::intrusive::member_hook<ResourceRequest, boost::intrusive::set_member_hook<>, &ResourceRequest::scheduling_hook>;

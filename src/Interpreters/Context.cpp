@@ -405,6 +405,7 @@ namespace Setting
     extern const SettingsDouble weight_lowering_age_seconds;
     extern const SettingsDouble weight_lowering_cpu_seconds;
     extern const SettingsDouble weight_lowering_io_bytes;
+    extern const SettingsDouble expected_query_runtime;
     extern const SettingsInt64 workload_priority;
     extern const SettingsString compatibility;
     extern const SettingsBool allow_experimental_analyzer;
@@ -2780,6 +2781,7 @@ ClassifierPtr Context::getWorkloadClassifier() const
         .weight_lowering_age_seconds = query_settings[Setting::weight_lowering_age_seconds],
         .weight_lowering_cpu_seconds = query_settings[Setting::weight_lowering_cpu_seconds],
         .weight_lowering_io_bytes = query_settings[Setting::weight_lowering_io_bytes],
+        .expected_query_runtime = query_settings[Setting::expected_query_runtime],
         .priority = Priority{query_settings[Setting::workload_priority]},
         .memory_tracker = process_list_element ? process_list_element->getMemoryTracker() : nullptr,
     };

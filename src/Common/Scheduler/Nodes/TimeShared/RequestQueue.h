@@ -43,6 +43,7 @@ enum class SchedulerAlgorithm
     Gittins, /// Gittins index for the base distribution, bucketed into normalized powers-of-two levels
     MemGittins, /// Memory-conditional Gittins index, bucketed into normalized powers-of-two levels
     Priority, /// Strict priority by the query's `priority` setting (lower value first; can starve)
+    Srpt, /// Shortest Remaining Processing Time from expected runtime minus attained CPU service
 };
 
 inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
@@ -59,9 +60,11 @@ inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
         return SchedulerAlgorithm::MemGittins;
     if (name == "priority")
         return SchedulerAlgorithm::Priority;
+    if (name == "srpt")
+        return SchedulerAlgorithm::Srpt;
     throw Exception(
         ErrorCodes::BAD_ARGUMENTS,
-        "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins' or 'priority')",
+        "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins', 'priority' or 'srpt')",
         name);
 }
 
@@ -445,6 +448,109 @@ private:
     Set requests;
 };
 
+/// `srpt` — experimental Shortest Remaining Processing Time for CPU resources. A query's priority
+/// is its expected runtime minus attained CPU service; lower remaining time is served first, FIFO
+/// on ties. An expected runtime of zero means unknown and deliberately gives the query high
+/// priority. Unlike LAS, attained service makes this key decrease, so stale requests may be buried
+/// anywhere in the tree. Refresh every queued key before selecting an endpoint to keep the
+/// red-black-tree ordering valid.
+class SrptAlgorithm final : public ISchedulingAlgorithm
+{
+public:
+    void push(ResourceRequest * request) override
+    {
+        request->scheduling.key = {remainingService(*request), next_seq++};
+        requests.insert(*request);
+    }
+
+    ResourceRequest * pop() override
+    {
+        refreshKeys();
+        if (requests.empty())
+            return nullptr;
+        auto it = requests.begin();
+        ResourceRequest * request = &*it;
+        requests.erase(it);
+        return request;
+    }
+
+    bool erase(ResourceRequest * request) override
+    {
+        if (!request->scheduling_hook.is_linked())
+            return false;
+        requests.erase(requests.iterator_to(*request));
+        return true;
+    }
+
+    ResourceRequest * popWorst() override
+    {
+        refreshKeys();
+        if (requests.empty())
+            return nullptr;
+        auto it = std::prev(requests.end());
+        ResourceRequest * request = &*it;
+        requests.erase(it);
+        return request;
+    }
+
+    void pullAll(ResourceRequest::EnqueuedList & out) noexcept override
+    {
+        refreshKeys();
+        while (!requests.empty())
+        {
+            ResourceRequest & request = *requests.begin();
+            requests.erase(requests.begin());
+            out.push_back(request);
+        }
+    }
+
+    void reset() noexcept override
+    {
+        chassert(requests.empty());
+        next_seq = 0;
+    }
+
+    bool empty() const override { return requests.empty(); }
+
+private:
+    static double remainingService(const ResourceRequest & request)
+    {
+        chassert(request.scheduling.context);
+        constexpr double nanoseconds_per_second = 1e9;
+        const double expected = request.scheduling.context->expected_query_runtime * nanoseconds_per_second;
+        const Int64 attained = request.scheduling.state->attained_cost.load(std::memory_order_relaxed);
+        return expected - static_cast<double>(attained);
+    }
+
+    void refreshKeys() noexcept
+    {
+        for (auto it = requests.begin(); it != requests.end();)
+        {
+            ResourceRequest * request = &*it;
+            ++it;
+            const double current_key = remainingService(*request);
+            if (current_key != request->scheduling.key.first)
+            {
+                requests.erase(requests.iterator_to(*request));
+                request->scheduling.key.first = current_key;
+                requests.insert(*request);
+            }
+        }
+    }
+
+    struct ByKey
+    {
+        bool operator()(const ResourceRequest & lhs, const ResourceRequest & rhs) const noexcept
+        {
+            return lhs.scheduling.key < rhs.scheduling.key;
+        }
+    };
+    using Set = boost::intrusive::set<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByKey>>;
+
+    UInt64 next_seq = 0;
+    Set requests;
+};
+
 /// Gittins policy. Attained CPU service chooses a 100 ms row. The naive policy always uses the base
 /// distribution (memory above 0 GiB); the memory-conditioned policy chooses a distribution column
 /// from peak per-query memory. Raw indices are normalized once at construction: zero is level 0,
@@ -753,6 +859,7 @@ public:
         // Charge attained service unconditionally: every request carries a valid per-query state,
         // stamped from its classifier link at enqueue. The declared cost is the estimate now that the
         // request is served; `finish()` corrects it to real cost later. Unread by `fifo`/`priority`.
+        // `srpt` observes the updated value when it refreshes keys before the next selection.
         request->scheduling.state->attained_cost.fetch_add(request->scheduling.cost, std::memory_order_relaxed);
         queue_cost -= request->cost;
         chassert(total_requests > 0);
@@ -913,6 +1020,7 @@ private:
             case SchedulerAlgorithm::Gittins: return gittins_algorithm;
             case SchedulerAlgorithm::MemGittins: return mem_gittins_algorithm;
             case SchedulerAlgorithm::Priority: return priority_algorithm;
+            case SchedulerAlgorithm::Srpt: return srpt_algorithm;
         }
         UNREACHABLE();
     }
@@ -949,6 +1057,7 @@ private:
     GittinsAlgorithm gittins_algorithm;
     GittinsAlgorithm mem_gittins_algorithm;
     PriorityAlgorithm priority_algorithm;
+    SrptAlgorithm srpt_algorithm;
     Int64 max_queued;
     SchedulerAlgorithm algorithm;
     ISchedulingAlgorithm * algo;
