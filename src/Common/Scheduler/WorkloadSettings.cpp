@@ -148,6 +148,16 @@ Int64 WorkloadSettings::getSoftAllocationLimit(CostUnit unit) const
     }
 }
 
+void WorkloadSettings::validateForResource(CostUnit unit, const String & resource_name) const
+{
+    if (scheduler == "srpt" && unit != CostUnit::CPUNanosecond)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "The `srpt` workload scheduler can only be used with CPU resources, but resource '{}' has cost unit '{}'",
+            resource_name,
+            costUnitToString(unit));
+}
+
 
 void WorkloadSettings::initFromChanges(const ASTCreateWorkloadQuery::SettingsChanges & changes, const String & resource_name, bool throw_on_unknown_setting)
 {

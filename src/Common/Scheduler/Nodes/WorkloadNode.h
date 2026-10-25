@@ -29,7 +29,6 @@ namespace DB
 
 namespace ErrorCodes
 {
-    extern const int BAD_ARGUMENTS;
     extern const int INVALID_SCHEDULER_NODE;
 }
 
@@ -47,11 +46,7 @@ struct WorkloadNodeTraits<ITimeSharedNode>
     // always run `fifo` regardless of the workload `scheduler` setting.
     static SchedulerAlgorithm schedulerFor(const WorkloadSettings & settings_, CostUnit unit)
     {
-        if (settings_.scheduler == "srpt" && unit != CostUnit::CPUNanosecond)
-            throw Exception(
-                ErrorCodes::BAD_ARGUMENTS,
-                "The `srpt` workload scheduler can only be used with CPU resources, not cost unit '{}'",
-                costUnitToString(unit));
+        settings_.validateForResource(unit);
         if (unit == CostUnit::IOByte || unit == CostUnit::CPUNanosecond)
             return parseSchedulerAlgorithm(settings_.scheduler);
         return SchedulerAlgorithm::Fifo;

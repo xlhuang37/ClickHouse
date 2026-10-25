@@ -25,7 +25,6 @@ namespace DB
 
 namespace ErrorCodes
 {
-    extern const int BAD_ARGUMENTS;
     extern const int RESOURCE_ACCESS_DENIED;
     extern const int LOGICAL_ERROR;
 }
@@ -59,12 +58,7 @@ WorkloadResourceManager::NodeInfo::NodeInfo(CostUnit unit_, const ASTPtr & ast, 
     // We ignore unknown settings here for forward-compatibility.
     // There is no way to report error at this point other than stop server.
     settings.initFromChanges(create->changes, resource_name, /*throw_on_unknown_setting=*/ false);
-    if (settings.scheduler == "srpt" && unit != CostUnit::CPUNanosecond)
-        throw Exception(
-            ErrorCodes::BAD_ARGUMENTS,
-            "The `srpt` workload scheduler can only be used with CPU resources, but resource '{}' has cost unit '{}'",
-            resource_name,
-            costUnitToString(unit));
+    settings.validateForResource(unit, resource_name);
 }
 
 WorkloadResourceManager::Resource::Resource(const ASTPtr & resource_entity_)
