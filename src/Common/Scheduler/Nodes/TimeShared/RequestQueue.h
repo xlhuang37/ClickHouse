@@ -43,7 +43,7 @@ enum class SchedulerAlgorithm
     Gittins, /// Gittins index for the base distribution, bucketed into normalized powers-of-two levels
     MemGittins, /// Memory-conditional Gittins index, bucketed into normalized powers-of-two levels
     Priority, /// Strict priority by the query's `priority` setting (lower value first; can starve)
-    Srpt, /// Shortest Remaining Processing Time from expected runtime minus attained CPU service
+    Srpt, /// Shortest Remaining Response Time from expected runtime minus attained CPU service
 };
 
 inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
@@ -448,7 +448,7 @@ private:
     Set requests;
 };
 
-/// `srpt` — experimental Shortest Remaining Processing Time for CPU resources. A query's priority
+/// `srpt` — experimental Shortest Remaining Response Time for CPU resources. A query's priority
 /// is its expected runtime minus attained CPU service; lower remaining time is served first, FIFO
 /// on ties. An expected runtime of zero means unknown and deliberately gives the query high
 /// priority. Unlike LAS, attained service makes this key decrease, so stale requests may be buried
