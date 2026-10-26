@@ -5,6 +5,7 @@
 #include <Common/Scheduler/CostUnit.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <memory>
 
@@ -76,6 +77,7 @@ public:
         Float64 weight_lowering_age_seconds_,
         Float64 weight_lowering_cpu_seconds_,
         Float64 weight_lowering_io_bytes_,
+        Float64 expected_query_runtime_,
         Priority priority_,
         MemoryTracker * memory_tracker_ = nullptr)
         : start_ns(start_ns_)
@@ -87,6 +89,7 @@ public:
         , weight_lowering_age_seconds(weight_lowering_age_seconds_ > 0 ? weight_lowering_age_seconds_ : 0.0)
         , weight_lowering_cpu_seconds(weight_lowering_cpu_seconds_ > 0 ? weight_lowering_cpu_seconds_ : 0.0)
         , weight_lowering_io_bytes(weight_lowering_io_bytes_ > 0 ? weight_lowering_io_bytes_ : 0.0)
+        , expected_query_runtime(expected_query_runtime_ > 0 && std::isfinite(expected_query_runtime_) ? expected_query_runtime_ : 0.0)
         , priority(priority_)
         , memory_tracker(memory_tracker_)
     {
@@ -99,6 +102,7 @@ public:
     const Float64 weight_lowering_age_seconds; /// Age threshold, seconds (0 = disabled)
     const Float64 weight_lowering_cpu_seconds; /// Attained CPU-seconds threshold (0 = disabled)
     const Float64 weight_lowering_io_bytes; /// Attained IO-bytes threshold (0 = disabled)
+    const Float64 expected_query_runtime; /// Expected runtime in microseconds for `srpt` (0 = unknown/high priority)
     const Priority priority; /// `priority` scheduler order (`workload_priority`): lower = higher, 0 neutral, negatives outrank it
     MemoryTracker * const memory_tracker; /// Query-level tracker; owned by QueryStatus for this context's lifetime
 

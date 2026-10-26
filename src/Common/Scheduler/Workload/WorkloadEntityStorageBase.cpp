@@ -73,6 +73,16 @@ WorkloadEntityType getEntityType(const ASTPtr & ptr)
     return WorkloadEntityType::MAX;
 }
 
+void validateWorkloadForResource(
+    const ASTCreateWorkloadQuery & workload,
+    const ASTCreateResourceQuery & resource,
+    bool throw_on_unknown_setting)
+{
+    WorkloadSettings settings;
+    settings.initFromChanges(workload.changes, resource.getResourceName(), throw_on_unknown_setting);
+    settings.validateForResource(resource.unit, resource.getResourceName());
+}
+
 bool entityEquals(const ASTPtr & lhs, const ASTPtr & rhs)
 {
     if (auto * a = typeid_cast<ASTCreateWorkloadQuery *>(lhs.get()))
@@ -452,6 +462,9 @@ bool WorkloadEntityStorageBase::storeEntity(
             // Check the settings values and throw if something is wrong
             WorkloadSettings validator;
             validator.initFromChanges(workload->changes);
+            for (const auto & entry : entities)
+                if (const auto * existing_resource = typeid_cast<ASTCreateResourceQuery *>(entry.second.get()))
+                    validateWorkloadForResource(*workload, *existing_resource, /*throw_on_unknown_setting=*/true);
         }
 
         // Validate resource: cost unit cannot change via CREATE OR REPLACE — the scheduler
@@ -469,6 +482,10 @@ bool WorkloadEntityStorageBase::storeEntity(
         // Validate resource
         if (resource)
         {
+            for (const auto & entry : entities)
+                if (const auto * existing_workload = typeid_cast<ASTCreateWorkloadQuery *>(entry.second.get()))
+                    validateWorkloadForResource(*existing_workload, *resource, /*throw_on_unknown_setting=*/true);
+
             for (const auto & operation : resource->operations)
             {
                 if (operation.mode == ResourceAccessMode::MasterThread)
@@ -792,6 +809,18 @@ void WorkloadEntityStorageBase::setLocalEntities(const std::vector<std::pair<Str
                 }
             }
         }
+    }
+
+    // Validate resource-dependent settings against the complete post-update entity set. This also
+    // covers adding a new resource when an unchanged workload has a workload-wide scheduler.
+    for (const auto & workload_entry : merged_new_entities)
+    {
+        const auto * workload = typeid_cast<ASTCreateWorkloadQuery *>(workload_entry.second.get());
+        if (!workload)
+            continue;
+        for (const auto & resource_entry : merged_new_entities)
+            if (const auto * resource = typeid_cast<ASTCreateResourceQuery *>(resource_entry.second.get()))
+                validateWorkloadForResource(*workload, *resource, /*throw_on_unknown_setting=*/false);
     }
 
     // Update local entities

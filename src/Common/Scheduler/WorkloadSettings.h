@@ -35,7 +35,7 @@ struct WorkloadSettings
     Float64 max_queries_per_second = 0; // Zero means unlimited
     Float64 max_burst_queries = 0; // default is `default_burst_seconds * max_queries_per_second`
 
-    /// Intra-workload scheduling algorithm: "fifo" (default), "fair", "las", "gittins", "mem-gittins", or "priority".
+    /// Intra-workload scheduling algorithm: "fifo" (default), "fair", "las", "gittins", "mem-gittins", "priority", or "srpt".
     String scheduler = "fifo";
 
     /// Limits total number of concurrent resource requests that are allowed to consume
@@ -82,6 +82,9 @@ struct WorkloadSettings
 
     // Should be called after default constructor
     void initFromChanges(const ASTCreateWorkloadQuery::SettingsChanges & changes, const String & resource_name = {}, bool throw_on_unknown_setting = true);
+
+    /// Validate settings whose meaning depends on the target resource's cost unit.
+    void validateForResource(CostUnit unit, const String & resource_name = {}) const;
 };
 
 }

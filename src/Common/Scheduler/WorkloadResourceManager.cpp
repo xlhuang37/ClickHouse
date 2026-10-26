@@ -58,6 +58,7 @@ WorkloadResourceManager::NodeInfo::NodeInfo(CostUnit unit_, const ASTPtr & ast, 
     // We ignore unknown settings here for forward-compatibility.
     // There is no way to report error at this point other than stop server.
     settings.initFromChanges(create->changes, resource_name, /*throw_on_unknown_setting=*/ false);
+    settings.validateForResource(unit, resource_name);
 }
 
 WorkloadResourceManager::Resource::Resource(const ASTPtr & resource_entity_)
@@ -368,6 +369,7 @@ WorkloadResourceManager::Classifier::Classifier(const ClassifierSettings & setti
           settings.weight_lowering_age_seconds,
           settings.weight_lowering_cpu_seconds,
           settings.weight_lowering_io_bytes,
+          settings.expected_query_runtime,
           settings.priority,
           settings.memory_tracker))
 {

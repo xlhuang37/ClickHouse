@@ -112,7 +112,7 @@ public:
             // Now that the real cost is known, correct the per-query service charged at the enqueue
             // estimate. Applied unconditionally (every enqueued request carries a valid per-query
             // state): `fair` reads `attained_cost` for its thresholds and drains `vruntime_correction`,
-            // `las` reads `attained_cost` for its level, `fifo`/`priority` read neither (harmless).
+            // `las` and `srpt` read `attained_cost` for ordering, `fifo`/`priority` read neither (harmless).
             const Int64 service_delta = static_cast<Int64>(real_cost_) - static_cast<Int64>(scheduling.cost);
             if (service_delta != 0) // common case real == estimate: both adds are no-ops, skip the RMWs
             {

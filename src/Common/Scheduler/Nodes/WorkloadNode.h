@@ -46,6 +46,7 @@ struct WorkloadNodeTraits<ITimeSharedNode>
     // always run `fifo` regardless of the workload `scheduler` setting.
     static SchedulerAlgorithm schedulerFor(const WorkloadSettings & settings_, CostUnit unit)
     {
+        settings_.validateForResource(unit);
         if (unit == CostUnit::IOByte || unit == CostUnit::CPUNanosecond)
             return parseSchedulerAlgorithm(settings_.scheduler);
         return SchedulerAlgorithm::Fifo;

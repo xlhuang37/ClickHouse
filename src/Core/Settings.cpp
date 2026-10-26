@@ -8814,6 +8814,10 @@ For the `fair` workload scheduler: once the query has attained this many CPU-sec
 For the `fair` workload scheduler: once the query has attained this many bytes of IO, its weight is lowered by `weight_lowering_factor`. Applies to IO resources. `0` (or any negative value) disables the IO threshold.
 )", 0, \
     {"26.10", 0, 0, "New query setting: attained IO-bytes threshold after which a query's weight is lowered in the `fair` workload scheduler."}) \
+    DECLARE(Double, expected_query_runtime, 0, R"(
+Expected query runtime in microseconds, used by the experimental `srpt` workload scheduler (see the `scheduler` workload setting). Queries are ordered by expected runtime minus attained CPU service, with the lowest remaining runtime served first. The default `0` marks the runtime as unknown and gives the query high priority. Non-positive values are treated as `0`. Ignored by other schedulers.
+)", 0, \
+    {"26.10", 0, 0, "New query setting: expected runtime used by the experimental `srpt` workload scheduler."}) \
     DECLARE(Int64, workload_priority, 0, R"(
 Scheduling priority of the query within its workload, used by the `priority` workload scheduler (see the `scheduler` workload setting). Lower value = higher priority; the default `0` is the neutral baseline, a negative value raises the query above the default and a positive value lowers it. Queries of equal priority are served first-come-first-served. Ignored by the other schedulers.
 )", 0, \

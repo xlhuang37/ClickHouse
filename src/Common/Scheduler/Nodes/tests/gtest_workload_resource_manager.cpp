@@ -4436,6 +4436,44 @@ TEST(SchedulerWorkloadResourceManager, CpuLeafUsesConfiguredSchedulerLikeIO)
     EXPECT_EQ(Traits::schedulerFor(ws, CostUnit::QuerySlot), SchedulerAlgorithm::Fifo);
 }
 
+TEST(SchedulerWorkloadResourceManager, SrptSchedulerIsCpuOnly)
+{
+    using Traits = WorkloadNodeTraits<ITimeSharedNode>;
+
+    WorkloadSettings ws;
+    ASTCreateWorkloadQuery::SettingsChanges changes;
+    changes.emplace_back("scheduler", Field(String("srpt")), "");
+    ws.initFromChanges(changes);
+    EXPECT_EQ(Traits::schedulerFor(ws, CostUnit::CPUNanosecond), SchedulerAlgorithm::Srpt);
+    EXPECT_THROW(Traits::schedulerFor(ws, CostUnit::IOByte), DB::Exception);
+    EXPECT_THROW(Traits::schedulerFor(ws, CostUnit::QuerySlot), DB::Exception);
+    EXPECT_THROW(Traits::schedulerFor(ws, CostUnit::MemoryByte), DB::Exception);
+}
+
+TEST(SchedulerWorkloadResourceManager, SrptResourceValidationPrecedesPersistence)
+{
+    {
+        ResourceTest t;
+        t.query("CREATE RESOURCE cpu (MASTER THREAD, WORKER THREAD)");
+        t.query("CREATE RESOURCE query_slots (QUERY)");
+        EXPECT_NO_THROW(t.query("CREATE WORKLOAD all SETTINGS scheduler = 'srpt' FOR cpu"));
+        EXPECT_THROW(t.query("CREATE OR REPLACE WORKLOAD all SETTINGS scheduler = 'srpt'"), DB::Exception);
+    }
+    {
+        ResourceTest t;
+        t.query("CREATE WORKLOAD all SETTINGS scheduler = 'srpt'");
+        EXPECT_THROW(t.query("CREATE RESOURCE query_slots (QUERY)"), DB::Exception);
+    }
+    {
+        ResourceTest t;
+        EXPECT_THROW(
+            t.storage.loadFromString(
+                "CREATE RESOURCE query_slots (QUERY);\n"
+                "CREATE WORKLOAD all SETTINGS scheduler = 'srpt'"),
+            DB::Exception);
+    }
+}
+
 TEST(SchedulerWorkloadResourceManager, WorkloadSettingsMaxConcurrentThreadsRatioToCores)
 {
     const Int64 cores = static_cast<Int64>(getNumberOfCPUCoresToUse());

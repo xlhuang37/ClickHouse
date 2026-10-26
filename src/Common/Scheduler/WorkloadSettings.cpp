@@ -148,6 +148,16 @@ Int64 WorkloadSettings::getSoftAllocationLimit(CostUnit unit) const
     }
 }
 
+void WorkloadSettings::validateForResource(CostUnit unit, const String & resource_name) const
+{
+    if (scheduler == "srpt" && unit != CostUnit::CPUNanosecond)
+        throw Exception(
+            ErrorCodes::BAD_ARGUMENTS,
+            "The `srpt` workload scheduler can only be used with CPU resources, but resource '{}' has cost unit '{}'",
+            resource_name,
+            costUnitToString(unit));
+}
+
 
 void WorkloadSettings::initFromChanges(const ASTCreateWorkloadQuery::SettingsChanges & changes, const String & resource_name, bool throw_on_unknown_setting)
 {
@@ -276,10 +286,11 @@ void WorkloadSettings::initFromChanges(const ASTCreateWorkloadQuery::SettingsCha
             {
                 scheduler = value.safeGet<String>();
                 if (*scheduler != "fifo" && *scheduler != "fair" && *scheduler != "las"
-                    && *scheduler != "gittins" && *scheduler != "mem-gittins" && *scheduler != "priority")
+                    && *scheduler != "gittins" && *scheduler != "mem-gittins" && *scheduler != "priority"
+                    && *scheduler != "srpt")
                     throw Exception(ErrorCodes::BAD_ARGUMENTS,
                         "Unknown workload setting 'scheduler' value '{}' "
-                        "(expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins' or 'priority')",
+                        "(expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins', 'priority' or 'srpt')",
                         *scheduler);
             }
             else if (name == "max_io_requests" || name == "max_requests")
