@@ -42,6 +42,8 @@ enum class SchedulerAlgorithm
     Las, /// Least-Attained-Service, MLFQ-bucketed (favours short queries; can starve long ones)
     Gittins, /// Gittins index for the base distribution, bucketed into normalized powers-of-two levels
     MemGittins, /// Memory-conditional Gittins index, bucketed into normalized powers-of-two levels
+    GittinsRaw, /// Gittins index for the base distribution, ordered by the raw index
+    MemGittinsRaw, /// Memory-conditional Gittins index, ordered by the raw index
     Priority, /// Strict priority by the query's `priority` setting (lower value first; can starve)
     Srpt, /// Shortest Remaining Response Time from expected runtime minus attained CPU service
 };
@@ -58,13 +60,18 @@ inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
         return SchedulerAlgorithm::Gittins;
     if (name == "mem-gittins")
         return SchedulerAlgorithm::MemGittins;
+    if (name == "gittins-raw")
+        return SchedulerAlgorithm::GittinsRaw;
+    if (name == "mem-gittins-raw")
+        return SchedulerAlgorithm::MemGittinsRaw;
     if (name == "priority")
         return SchedulerAlgorithm::Priority;
     if (name == "srpt")
         return SchedulerAlgorithm::Srpt;
     throw Exception(
         ErrorCodes::BAD_ARGUMENTS,
-        "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins', 'priority' or 'srpt')",
+        "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins', "
+        "'gittins-raw', 'mem-gittins-raw', 'priority' or 'srpt')",
         name);
 }
 
@@ -553,38 +560,24 @@ private:
 
 /// Gittins policy. Attained CPU service chooses a 100 ms row. The naive policy always uses the base
 /// distribution (memory above 0 GiB); the memory-conditioned policy chooses a distribution column
-/// from peak per-query memory. Raw indices are normalized once at construction: zero is level 0,
-/// the global smallest positive index is level 1, and every doubling adds a level. Higher levels are
-/// served first, FIFO within a level. As in LAS, a queued request is lazily re-keyed before service
-/// so completed CPU quanta and, when applicable, peak memory are reflected without mutating set keys.
+/// from peak per-query memory. The standard variants normalize raw indices once at construction:
+/// zero is level 0, the global smallest positive index is level 1, and every doubling adds a level.
+/// The raw variants order directly by the table value. Higher values are served first, FIFO on ties.
+/// As in LAS, a queued request is lazily re-keyed before service so completed CPU quanta and, when
+/// applicable, peak memory are reflected without mutating set keys.
 class GittinsAlgorithm final : public ISchedulingAlgorithm
 {
 public:
-    explicit GittinsAlgorithm(CostUnit unit_, bool memory_conditioned_)
+    explicit GittinsAlgorithm(CostUnit unit_, bool memory_conditioned_, bool normalize_indices_)
         : unit(unit_)
         , memory_conditioned(memory_conditioned_)
+        , normalize_indices(normalize_indices_)
     {
-        double min_positive = std::numeric_limits<double>::max();
-        for (const auto & row : gittins_indices)
-            for (double index : row)
-                if (index > 0)
-                    min_positive = std::min(min_positive, index);
-
-        for (size_t attained = 0; attained < gittins_attained_buckets; ++attained)
-        {
-            for (size_t memory = 0; memory < gittins_memory_bands; ++memory)
-            {
-                const double index = gittins_indices[attained][memory];
-                levels[memory][attained] = index == 0
-                    ? 0
-                    : static_cast<UInt8>(1 + std::floor(std::log2(index / min_positive)));
-            }
-        }
     }
 
     void push(ResourceRequest * request) override
     {
-        request->scheduling.key = {-static_cast<double>(levelOf(*request)), next_seq++};
+        request->scheduling.key = {-priorityOf(*request), next_seq++};
         requests.insert(*request);
     }
 
@@ -594,7 +587,7 @@ public:
         {
             auto it = requests.begin();
             ResourceRequest * request = &*it;
-            const double current_key = -static_cast<double>(levelOf(*request));
+            const double current_key = -priorityOf(*request);
             if (current_key != request->scheduling.key.first)
             {
                 requests.erase(it);
@@ -647,7 +640,7 @@ public:
 private:
     static constexpr size_t base_memory_band = 0;
 
-    UInt8 levelOf(ResourceRequest & request) const
+    double priorityOf(ResourceRequest & request) const
     {
         auto & state = *request.scheduling.state;
         size_t memory_band = base_memory_band;
@@ -667,7 +660,37 @@ private:
         if (unit == CostUnit::CPUNanosecond && attained > 0)
             attained_bucket = std::min<UInt64>(
                 static_cast<UInt64>(attained) / 100'000'000ULL, gittins_attained_buckets - 1);
-        return levels[memory_band][attained_bucket];
+        if (normalize_indices)
+            return static_cast<double>(normalizedLevels()[memory_band][attained_bucket]);
+        return gittins_indices[attained_bucket][memory_band];
+    }
+
+    using Levels = std::array<std::array<UInt8, gittins_attained_buckets>, gittins_memory_bands>;
+
+    static const Levels & normalizedLevels()
+    {
+        static const Levels levels = []
+        {
+            Levels result{};
+            double min_positive = std::numeric_limits<double>::max();
+            for (const auto & row : gittins_indices)
+                for (double index : row)
+                    if (index > 0)
+                        min_positive = std::min(min_positive, index);
+
+            for (size_t attained = 0; attained < gittins_attained_buckets; ++attained)
+            {
+                for (size_t memory = 0; memory < gittins_memory_bands; ++memory)
+                {
+                    const double index = gittins_indices[attained][memory];
+                    result[memory][attained] = index == 0
+                        ? 0
+                        : static_cast<UInt8>(1 + std::floor(std::log2(index / min_positive)));
+                }
+            }
+            return result;
+        }();
+        return levels;
     }
 
     static size_t memoryBand(Int64 memory_usage)
@@ -694,7 +717,7 @@ private:
 
     const CostUnit unit;
     const bool memory_conditioned;
-    std::array<std::array<UInt8, gittins_attained_buckets>, gittins_memory_bands> levels{};
+    const bool normalize_indices;
     UInt64 next_seq = 0;
     Set requests;
 };
@@ -807,8 +830,10 @@ public:
         : ISchedulerQueue(event_queue_, info_)
         , fair_algorithm(unit_)
         , las_algorithm(unit_)
-        , gittins_algorithm(unit_, false)
-        , mem_gittins_algorithm(unit_, true)
+        , gittins_algorithm(unit_, false, true)
+        , mem_gittins_algorithm(unit_, true, true)
+        , gittins_raw_algorithm(unit_, false, false)
+        , mem_gittins_raw_algorithm(unit_, true, false)
         , max_queued(max_queued_)
         , algorithm(algorithm_)
         , algo(&algorithmFor(algorithm_))
@@ -1019,6 +1044,8 @@ private:
             case SchedulerAlgorithm::Las: return las_algorithm;
             case SchedulerAlgorithm::Gittins: return gittins_algorithm;
             case SchedulerAlgorithm::MemGittins: return mem_gittins_algorithm;
+            case SchedulerAlgorithm::GittinsRaw: return gittins_raw_algorithm;
+            case SchedulerAlgorithm::MemGittinsRaw: return mem_gittins_raw_algorithm;
             case SchedulerAlgorithm::Priority: return priority_algorithm;
             case SchedulerAlgorithm::Srpt: return srpt_algorithm;
         }
@@ -1056,6 +1083,8 @@ private:
     LasAlgorithm las_algorithm;
     GittinsAlgorithm gittins_algorithm;
     GittinsAlgorithm mem_gittins_algorithm;
+    GittinsAlgorithm gittins_raw_algorithm;
+    GittinsAlgorithm mem_gittins_raw_algorithm;
     PriorityAlgorithm priority_algorithm;
     SrptAlgorithm srpt_algorithm;
     Int64 max_queued;

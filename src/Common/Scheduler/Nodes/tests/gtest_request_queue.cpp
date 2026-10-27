@@ -477,6 +477,41 @@ TEST(RequestQueue, GittinsUsesBaseDistribution)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2, 1}));
 }
 
+/// Raw Gittins preserves differences that the power-of-two normalization deliberately buckets
+/// together. Base-distribution buckets 0 and 1 are both normalized level 5, but bucket 1 has the
+/// larger raw index and therefore runs first in the raw variant.
+TEST(RequestQueue, GittinsRawDoesNotNormalizeIndices)
+{
+    Fixture normalized(SchedulerAlgorithm::Gittins, CostUnit::CPUNanosecond);
+    auto * normalized_fresh = normalized.makeQuery();
+    auto * normalized_aged = normalized.makeQuery();
+    normalized_aged->resourceState(0)->attained_cost.store(100'000'000);
+    normalized.enqueue(1, normalized_fresh);
+    normalized.enqueue(2, normalized_aged);
+    EXPECT_EQ(normalized.dequeueIds(), (std::vector<int>{1, 2}));
+
+    Fixture raw(SchedulerAlgorithm::GittinsRaw, CostUnit::CPUNanosecond);
+    auto * raw_fresh = raw.makeQuery();
+    auto * raw_aged = raw.makeQuery();
+    raw_aged->resourceState(0)->attained_cost.store(100'000'000);
+    raw.enqueue(1, raw_fresh);
+    raw.enqueue(2, raw_aged);
+    EXPECT_EQ(raw.dequeueIds(), (std::vector<int>{2, 1}));
+}
+
+TEST(RequestQueue, MemGittinsRawUsesMemoryDistribution)
+{
+    Fixture f(SchedulerAlgorithm::MemGittinsRaw, CostUnit::CPUNanosecond);
+    auto * small = f.makeQuery();
+    auto * large = f.makeQuery();
+    small->resourceState(0)->memory_usage.store(0);
+    large->resourceState(0)->memory_usage.store(1LL << 30);
+
+    f.enqueue(2, large);
+    f.enqueue(1, small);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2}));
+}
+
 /// The final table row is the zero-index sentinel. Zero is normalized to the lowest priority level,
 /// with FIFO as the tie-break.
 TEST(RequestQueue, GittinsZeroIndexIsLowestLevel)
