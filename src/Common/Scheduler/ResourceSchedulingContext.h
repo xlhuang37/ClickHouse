@@ -69,6 +69,15 @@ struct ResourceQueryState
         double vruntime = 0.0;
         bool initialized = false;
     } fair_max;
+
+    /// `fair-tier` only (leaf thread). `base_tier` is the lowest tier active in the queue when this
+    /// query was first seen. The query's tier is `base_tier` plus one step per `5'000'000'000` of
+    /// its own attained service, so a new query joins the current step instead of starting at 0.
+    struct
+    {
+        double base_tier = 0.0;
+        bool initialized = false;
+    } fair_tier;
 };
 
 /// Per-query scheduling context: the query-global config the schedulers read (weight, thresholds,

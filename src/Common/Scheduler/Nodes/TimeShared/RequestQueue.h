@@ -21,6 +21,7 @@
 #include <limits>
 #include <mutex>
 #include <string_view>
+#include <vector>
 
 
 namespace DB
@@ -558,9 +559,10 @@ private:
 
 /// `fair-tier` — first-come, first-served inside fixed attained-service tiers of
 /// `5'000'000'000` cost units (5 CPU-seconds, or 5 GiB on an IO resource). A lower tier is served
-/// first. Within a tier, an earlier query `start_ns` stays ahead of a later arrival, including
-/// after a requeue. Once attained service crosses into the next tier, a queued request is re-keyed
-/// and yields to queries that are still in an earlier tier.
+/// first. A query first seen while other queries are active joins their lowest tier, then moves up
+/// one tier for every further step of its own attained service. Within a tier, an earlier query
+/// `start_ns` stays ahead of a later arrival, including after a requeue. Once a query crosses into
+/// the next tier, a queued request is re-keyed and yields to queries still in an earlier tier.
 class FairTierAlgorithm final : public ISchedulingAlgorithm
 {
 public:
@@ -569,8 +571,14 @@ public:
     void push(ResourceRequest * request) override
     {
         chassert(request->scheduling.context);
-        const Int64 attained = request->scheduling.state->attained_cost.load(std::memory_order_relaxed);
-        request->scheduling.key = {tierOf(attained), next_seq++};
+        auto & state = *request->scheduling.state;
+        forgetInService(&state);
+        if (!state.fair_tier.initialized)
+        {
+            state.fair_tier.base_tier = lowestActiveTier();
+            state.fair_tier.initialized = true;
+        }
+        request->scheduling.key = {effectiveTier(state), next_seq++};
         requests.insert(*request);
     }
 
@@ -580,7 +588,7 @@ public:
         {
             auto it = requests.begin();
             ResourceRequest * request = &*it;
-            const double real_tier = tierOf(request->scheduling.state->attained_cost.load(std::memory_order_relaxed));
+            const double real_tier = effectiveTier(*request->scheduling.state);
             if (real_tier > request->scheduling.key.first)
             {
                 requests.erase(it);
@@ -589,6 +597,7 @@ public:
                 continue;
             }
             requests.erase(it);
+            noteInService(request->scheduling.state);
             return request;
         }
         return nullptr;
@@ -620,11 +629,13 @@ public:
             requests.erase(requests.begin());
             out.push_back(request);
         }
+        in_service.clear();
     }
 
     void reset() noexcept override
     {
         chassert(requests.empty());
+        in_service.clear();
         next_seq = 0;
     }
 
@@ -636,6 +647,38 @@ private:
         if (attained <= 0)
             return 0;
         return static_cast<double>(static_cast<UInt64>(attained) / static_cast<UInt64>(tier_cost));
+    }
+
+    static double effectiveTier(const ResourceQueryState & state)
+    {
+        const Int64 attained = state.attained_cost.load(std::memory_order_relaxed);
+        return state.fair_tier.base_tier + tierOf(attained);
+    }
+
+    /// Lowest tier of a query that is queued or was popped and has not requeued. An idle queue with
+    /// nothing in service is tier 0. Read from current `attained_cost`, not the stored key: a queued
+    /// request's key stays at the tier it had when it was pushed.
+    double lowestActiveTier() const
+    {
+        double lowest = std::numeric_limits<double>::infinity();
+        for (const ResourceRequest & request : requests)
+            lowest = std::min(lowest, effectiveTier(*request.scheduling.state));
+        for (const ResourceQueryState * state : in_service)
+            lowest = std::min(lowest, effectiveTier(*state));
+        if (lowest == std::numeric_limits<double>::infinity())
+            return 0;
+        return lowest;
+    }
+
+    void noteInService(ResourceQueryState * state)
+    {
+        if (std::find(in_service.begin(), in_service.end(), state) == in_service.end())
+            in_service.push_back(state);
+    }
+
+    void forgetInService(ResourceQueryState * state)
+    {
+        std::erase(in_service, state);
     }
 
     /// Tier, then query start time, then insertion sequence. The sequence only separates requests
@@ -657,6 +700,9 @@ private:
 
     UInt64 next_seq = 0;
     Set requests;
+    /// Queries whose latest request was popped and that have not pushed again. Their attained tier
+    /// stays visible while the queue is empty, so a new arrival joins them instead of tier 0.
+    std::vector<ResourceQueryState *> in_service;
 };
 
 /// `srpt` — experimental Shortest Remaining Response Time for CPU resources. A query's priority
@@ -1203,6 +1249,14 @@ public:
             {
                 request.scheduling.state->fair_max.vruntime = 0.0;
                 request.scheduling.state->fair_max.initialized = false;
+            }
+        // `fair-tier` likewise restarts from an empty active set, so a moved query must join again
+        // instead of keeping a base tier from the previous algorithm instance.
+        if (new_algorithm == SchedulerAlgorithm::FairTier)
+            for (ResourceRequest & request : pending)
+            {
+                request.scheduling.state->fair_tier.base_tier = 0.0;
+                request.scheduling.state->fair_tier.initialized = false;
             }
         while (!pending.empty())
         {

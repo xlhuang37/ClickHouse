@@ -397,8 +397,8 @@ TEST(RequestQueue, FairMaxNewQueryStartsAtHighestService)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2, 3}));
 }
 
-/// fair-tier: after A's attained CPU crosses one 5-second tier, B's still-lower tier is served
-/// before A's next request.
+/// fair-tier: B arrives while tier 0 is still the lowest active tier, so B joins tier 0. After A's
+/// attained CPU crosses one 5-second tier, B's still-lower tier is served before A's next request.
 TEST(RequestQueue, FairTierYieldsAfterStep)
 {
     Fixture f(SchedulerAlgorithm::FairTier, CostUnit::CPUNanosecond);
@@ -408,6 +408,22 @@ TEST(RequestQueue, FairTierYieldsAfterStep)
     f.enqueue(2, a, 1);
     f.enqueue(3, b, 1);
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2}));
+}
+
+/// A query that arrives after another query has already crossed a tier joins that query's tier.
+/// It does not start at 0 and preempt the query that is still in service.
+TEST(RequestQueue, FairTierNewQueryJoinsLowestActiveTier)
+{
+    Fixture f(SchedulerAlgorithm::FairTier, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, FairTierAlgorithm::tier_cost);
+    auto [served, _] = f.queue->dequeueRequest();
+    ASSERT_EQ(static_cast<TestRequest *>(served)->id, 1);
+    EXPECT_EQ(f.attainedOf(a), FairTierAlgorithm::tier_cost);
+    f.enqueue(2, b, 1); // queue is empty; A is in service at tier 1, so B joins tier 1
+    f.enqueue(3, a, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{3, 2}));
 }
 
 /// Inside one tier, the earlier query keeps both of its requests ahead of a later arrival,
