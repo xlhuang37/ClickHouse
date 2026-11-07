@@ -116,6 +116,64 @@ TEST(RequestQueue, FifoOrder)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2, 3, 4}));
 }
 
+/// fcfs: the sequence is assigned when a query first submits, and every request of that query
+/// keeps it. A's clock is later than B's, but A submitted first, so both of A's requests stay
+/// ahead of B. A's grants also hold the leaf until both have finished.
+TEST(RequestQueue, FcfsOrdersByQuerySequence)
+{
+    Fixture f(SchedulerAlgorithm::Fcfs, CostUnit::CPUNanosecond);
+    auto * first = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/100);
+    auto * second = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    f.enqueue(1, first, 1'000'000'000);
+    f.enqueue(2, second, 1); // submitted after A, despite the earlier clock
+    f.enqueue(3, first, 1); // same sequence as id 1, so still ahead of B
+    f.enqueue(4, second, 1);
+
+    auto [first_grant, active_after_first] = f.queue->dequeueRequest();
+    ASSERT_EQ(static_cast<TestRequest *>(first_grant)->id, 1);
+    auto [second_grant, active_after_second] = f.queue->dequeueRequest();
+    ASSERT_EQ(static_cast<TestRequest *>(second_grant)->id, 3);
+    (void)active_after_first;
+    (void)active_after_second;
+    // Both of the first query's grants are outstanding, so the second query is not admitted.
+    auto [blocked, active_while_held] = f.queue->dequeueRequest();
+    (void)active_while_held;
+    EXPECT_EQ(blocked, nullptr);
+
+    first_grant->finish();
+    auto [still_blocked, active_after_one_finish] = f.queue->dequeueRequest();
+    (void)active_after_one_finish;
+    EXPECT_EQ(still_blocked, nullptr);
+    second_grant->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2, 4}));
+}
+
+/// Requests of one query share its sequence, so the first query's later request stays ahead of
+/// the second query. The second query stays queued while the first query's grants are outstanding.
+TEST(RequestQueue, FcfsSameQuerySharesSequence)
+{
+    Fixture f(SchedulerAlgorithm::Fcfs);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/5);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/5);
+    f.enqueue(1, a);
+    f.enqueue(2, b);
+    f.enqueue(3, a);
+
+    auto [first, active_after_first] = f.queue->dequeueRequest();
+    auto [second, active_after_second] = f.queue->dequeueRequest();
+    (void)active_after_first;
+    (void)active_after_second;
+    EXPECT_EQ(static_cast<TestRequest *>(first)->id, 1);
+    EXPECT_EQ(static_cast<TestRequest *>(second)->id, 3);
+    auto [blocked, active_while_held] = f.queue->dequeueRequest();
+    (void)active_while_held;
+    EXPECT_EQ(blocked, nullptr);
+
+    first->finish();
+    second->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
+}
+
 /// fair, equal weights: two queries are interleaved fairly (SFQ round-robin).
 TEST(RequestQueue, FairEqualWeightInterleave)
 {
@@ -426,13 +484,13 @@ TEST(RequestQueue, FairTierNewQueryJoinsLowestActiveTier)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{3, 2}));
 }
 
-/// Inside one tier, the earlier query keeps both of its requests ahead of a later arrival,
-/// even when the later arrival was queued between them.
+/// Inside one tier the only FCFS key is the query sequence. A submitted first, so both of its
+/// requests stay ahead of B even though B's clock is earlier and B was queued between them.
 TEST(RequestQueue, FairTierKeepsFcfsInsideTier)
 {
     Fixture f(SchedulerAlgorithm::FairTier5, CostUnit::CPUNanosecond);
-    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
-    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/100);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
     f.enqueue(1, a, 1);
     f.enqueue(2, b, 1);
     f.enqueue(3, a, 1);
@@ -687,7 +745,7 @@ TEST(RequestQueue, SwapThroughAllSchedulersKeepsRequests)
     for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10,
                       SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins,
                       SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Srpt,
-                      SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
+                      SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
         f.queue->setScheduler(algo);
     auto [len, cost] = f.queue->getQueueLengthAndCost();
     EXPECT_EQ(len, 4u);
@@ -752,7 +810,7 @@ TEST(RequestQueue, LasRekeySeesPendingCorrection)
 /// Cancellation from the middle works for both algorithms; counters update.
 TEST(RequestQueue, CancelFromMiddle)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
                       SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
@@ -772,7 +830,7 @@ TEST(RequestQueue, CancelFromMiddle)
 /// max_waiting_queries is enforced on the total pending count for both algorithms.
 TEST(RequestQueue, MaxWaitingQueries)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
                       SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
@@ -928,7 +986,7 @@ TEST(RequestQueue, FairUsesSchedulingCostNotBudgetAdjustedCost)
 /// no longer depends on which algorithm is (or was) active.
 TEST(RequestQueue, AttainedChargedForEveryAlgorithm)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
                       SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10,
                       SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins,
                       SchedulerAlgorithm::Srpt})

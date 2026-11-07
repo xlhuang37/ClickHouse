@@ -79,6 +79,17 @@ struct ResourceQueryState
         double base_tier = 0.0;
         bool initialized = false;
     } fair_tier;
+
+    /// Assigned once, under the leaf queue mutex, when this query's first request is accepted on
+    /// this leaf. Every later request of the query reuses it. `fcfs` orders by this value alone.
+    /// `fair-tier-5` and `fair-tier-10` order by it inside a tier. Unique among queries on the leaf.
+    UInt64 fcfs_sequence = 0;
+    bool fcfs_sequence_assigned = false;
+
+    /// `fcfs` only, mutated under the leaf queue mutex. `fcfs_inflight` is the number of quanta this
+    /// leaf has popped for the query and that `finish()` has not released. While it is non-zero, a
+    /// query with a larger `fcfs_sequence` is not admitted on this leaf.
+    UInt32 fcfs_inflight = 0;
 };
 
 /// Per-query scheduling context: the query-global config the schedulers read (weight, thresholds,

@@ -27,6 +27,7 @@ class SrptAlgorithm;
 class FairMaxAlgorithm;
 class FairTierAlgorithm;
 class CPUSlotsAllocation;
+class ISchedulerNode;
 class ResourceSchedulingContext;
 struct ResourceQueryState;
 /// Fallback per-query state for requests not stamped by a classifier (defined in ResourceLink.cpp).
@@ -99,9 +100,10 @@ public:
 
         /// Ordering key for schedulers backed by the intrusive ordered set. `.first` is the virtual
         /// runtime (`fair`, `fair-max`), MLFQ level (`las`), attained-service tier (`fair-tier-5`,
-        /// `fair-tier-10`), or remaining service (`srpt`); `.second` is a monotonic sequence number
-        /// for a stable tie-break (also used by `priority`). `fair-tier-5` and `fair-tier-10` order an equal tier by query start
-        /// time before this sequence.
+        /// `fair-tier-10`), or remaining service (`srpt`); `.second` is a monotonic per-request
+        /// sequence for a stable tie-break (`fair`, `las`, `srpt`, `gittins`, `priority`). `fcfs`
+        /// stores the query's `fcfs_sequence` here and orders by that alone. `fair-tier-5` and
+        /// `fair-tier-10` store the same query sequence and order an equal tier by it alone.
         std::pair<double, UInt64> key{0.0, 0};
 
         /// Ordering key for the `priority` scheduler (lower value first, then `key.second` for FIFO).
@@ -113,6 +115,10 @@ public:
         /// cancelling a still-queued request can subtract it back out — otherwise the query is
         /// charged for service it never received, delaying its future requests. Zero otherwise.
         double vruntime_increment = 0.0;
+
+        /// `fcfs`: the leaf that popped this request, so `finish()` can drop the query's in-flight
+        /// count. Null unless this request is a granted `fcfs` quantum. Cleared by `finish()`/`reset()`.
+        ISchedulerNode * fcfs_leaf = nullptr;
     } scheduling;
 
     /// Scheduler nodes to be notified on consumption finish
@@ -142,6 +148,7 @@ public:
         scheduling.key = {0.0, 0};
         scheduling.priority = {};
         scheduling.vruntime_increment = 0.0;
+        scheduling.fcfs_leaf = nullptr;
         // Note that the intrusive hooks are reset independently (by their intrusive containers)
     }
 
@@ -169,6 +176,7 @@ public:
 private:
     friend class ISchedulingAlgorithm; // moves requests between algorithms through `EnqueuedList`
     friend class FifoAlgorithm; // uses `enqueued_hook` for the `fifo` scheduler
+    friend class FcfsAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fcfs` scheduler
     friend class FairAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fair` scheduler
     friend class LasAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `las` scheduler
     friend class GittinsAlgorithm; // uses `scheduling_hook` + `scheduling.key`

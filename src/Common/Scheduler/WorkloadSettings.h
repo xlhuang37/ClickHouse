@@ -35,7 +35,7 @@ struct WorkloadSettings
     Float64 max_queries_per_second = 0; // Zero means unlimited
     Float64 max_burst_queries = 0; // default is `default_burst_seconds * max_queries_per_second`
 
-    /// Intra-workload scheduling algorithm: "fifo" (default), "fair", "las", "gittins", "mem-gittins",
+    /// Intra-workload scheduling algorithm: "fifo" (default), "fcfs", "fair", "las", "gittins", "mem-gittins",
     /// "gittins-raw", "mem-gittins-raw", "priority", "srpt", "fair-max", "fair-tier-5", or "fair-tier-10".
     String scheduler = "fifo";
 
