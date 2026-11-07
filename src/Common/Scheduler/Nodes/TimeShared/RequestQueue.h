@@ -48,7 +48,8 @@ enum class SchedulerAlgorithm
     Priority, /// Strict priority by the query's `priority` setting (lower value first; can starve)
     Srpt, /// Shortest Remaining Response Time from expected runtime minus attained CPU service
     FairMax, /// New queries start at the highest attained service; less-served queries stay ahead
-    FairTier, /// FCFS by query start inside fixed 5-second attained-service tiers
+    FairTier5, /// FCFS by query start inside fixed 5-second attained-service tiers
+    FairTier10, /// FCFS by query start inside fixed 10-second attained-service tiers
 };
 
 inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
@@ -73,12 +74,14 @@ inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
         return SchedulerAlgorithm::Srpt;
     if (name == "fair-max")
         return SchedulerAlgorithm::FairMax;
-    if (name == "fair-tier")
-        return SchedulerAlgorithm::FairTier;
+    if (name == "fair-tier-5")
+        return SchedulerAlgorithm::FairTier5;
+    if (name == "fair-tier-10")
+        return SchedulerAlgorithm::FairTier10;
     throw Exception(
         ErrorCodes::BAD_ARGUMENTS,
         "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins', "
-        "'gittins-raw', 'mem-gittins-raw', 'priority', 'srpt', 'fair-max' or 'fair-tier')",
+        "'gittins-raw', 'mem-gittins-raw', 'priority', 'srpt', 'fair-max', 'fair-tier-5' or 'fair-tier-10')",
         name);
 }
 
@@ -557,16 +560,23 @@ private:
     Set requests;
 };
 
-/// `fair-tier` — first-come, first-served inside fixed attained-service tiers of
-/// `5'000'000'000` cost units (5 CPU-seconds, or 5 GiB on an IO resource). A lower tier is served
-/// first. A query first seen while other queries are active joins their lowest tier, then moves up
-/// one tier for every further step of its own attained service. Within a tier, an earlier query
-/// `start_ns` stays ahead of a later arrival, including after a requeue. Once a query crosses into
-/// the next tier, a queued request is re-keyed and yields to queries still in an earlier tier.
+/// `fair-tier-5` and `fair-tier-10` — first-come, first-served inside fixed attained-service tiers.
+/// The step is `5'000'000'000` or `10'000'000'000` cost units (5 or 10 CPU-seconds, or 5 or 10 GiB
+/// on an IO resource). A lower tier is served first. A query first seen while other queries are
+/// active joins their lowest tier, then moves up one tier for every further step of its own attained
+/// service. Within a tier, an earlier query `start_ns` stays ahead of a later arrival, including
+/// after a requeue. Once a query crosses into the next tier, a queued request is re-keyed and yields
+/// to queries still in an earlier tier.
 class FairTierAlgorithm final : public ISchedulingAlgorithm
 {
 public:
-    static constexpr ResourceCost tier_cost = 5'000'000'000;
+    static constexpr ResourceCost tier_5_cost = 5'000'000'000;
+    static constexpr ResourceCost tier_10_cost = 10'000'000'000;
+
+    explicit FairTierAlgorithm(ResourceCost tier_cost_)
+        : tier_cost(tier_cost_)
+    {
+    }
 
     void push(ResourceRequest * request) override
     {
@@ -642,14 +652,14 @@ public:
     bool empty() const override { return requests.empty(); }
 
 private:
-    static double tierOf(Int64 attained)
+    double tierOf(Int64 attained) const
     {
         if (attained <= 0)
             return 0;
         return static_cast<double>(static_cast<UInt64>(attained) / static_cast<UInt64>(tier_cost));
     }
 
-    static double effectiveTier(const ResourceQueryState & state)
+    double effectiveTier(const ResourceQueryState & state) const
     {
         const Int64 attained = state.attained_cost.load(std::memory_order_relaxed);
         return state.fair_tier.base_tier + tierOf(attained);
@@ -698,6 +708,7 @@ private:
     };
     using Set = boost::intrusive::set<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByTierAndStart>>;
 
+    const ResourceCost tier_cost;
     UInt64 next_seq = 0;
     Set requests;
     /// Queries whose latest request was popped and that have not pushed again. Their attained tier
@@ -1250,9 +1261,9 @@ public:
                 request.scheduling.state->fair_max.vruntime = 0.0;
                 request.scheduling.state->fair_max.initialized = false;
             }
-        // `fair-tier` likewise restarts from an empty active set, so a moved query must join again
-        // instead of keeping a base tier from the previous algorithm instance.
-        if (new_algorithm == SchedulerAlgorithm::FairTier)
+        // `fair-tier-5` and `fair-tier-10` likewise restart from an empty active set, so a moved
+        // query must join again instead of keeping a base tier from the previous algorithm instance.
+        if (new_algorithm == SchedulerAlgorithm::FairTier5 || new_algorithm == SchedulerAlgorithm::FairTier10)
             for (ResourceRequest & request : pending)
             {
                 request.scheduling.state->fair_tier.base_tier = 0.0;
@@ -1315,7 +1326,8 @@ private:
             case SchedulerAlgorithm::Priority: return priority_algorithm;
             case SchedulerAlgorithm::Srpt: return srpt_algorithm;
             case SchedulerAlgorithm::FairMax: return fair_max_algorithm;
-            case SchedulerAlgorithm::FairTier: return fair_tier_algorithm;
+            case SchedulerAlgorithm::FairTier5: return fair_tier_5_algorithm;
+            case SchedulerAlgorithm::FairTier10: return fair_tier_10_algorithm;
         }
         UNREACHABLE();
     }
@@ -1356,7 +1368,8 @@ private:
     PriorityAlgorithm priority_algorithm;
     SrptAlgorithm srpt_algorithm;
     FairMaxAlgorithm fair_max_algorithm;
-    FairTierAlgorithm fair_tier_algorithm;
+    FairTierAlgorithm fair_tier_5_algorithm{FairTierAlgorithm::tier_5_cost};
+    FairTierAlgorithm fair_tier_10_algorithm{FairTierAlgorithm::tier_10_cost};
     Int64 max_queued;
     SchedulerAlgorithm algorithm;
     ISchedulingAlgorithm * algo;

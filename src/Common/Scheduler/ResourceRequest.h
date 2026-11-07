@@ -98,9 +98,9 @@ public:
         ResourceQueryState * state = &default_scheduling_state;
 
         /// Ordering key for schedulers backed by the intrusive ordered set. `.first` is the virtual
-        /// runtime (`fair`, `fair-max`), MLFQ level (`las`), attained-service tier (`fair-tier`),
-        /// or remaining service (`srpt`); `.second` is a monotonic sequence number for a stable
-        /// tie-break (also used by `priority`). `fair-tier` orders an equal tier by query start
+        /// runtime (`fair`, `fair-max`), MLFQ level (`las`), attained-service tier (`fair-tier-5`,
+        /// `fair-tier-10`), or remaining service (`srpt`); `.second` is a monotonic sequence number
+        /// for a stable tie-break (also used by `priority`). `fair-tier-5` and `fair-tier-10` order an equal tier by query start
         /// time before this sequence.
         std::pair<double, UInt64> key{0.0, 0};
 
@@ -175,7 +175,7 @@ private:
     friend class PriorityAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `priority` scheduler
     friend class SrptAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `srpt` scheduler
     friend class FairMaxAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fair-max` scheduler
-    friend class FairTierAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fair-tier` scheduler
+    friend class FairTierAlgorithm; // uses `scheduling_hook` + `scheduling.key` for `fair-tier-5` and `fair-tier-10`
     friend class RequestQueue;
     friend class CPUSlotsAllocation; // hack for tests only
 

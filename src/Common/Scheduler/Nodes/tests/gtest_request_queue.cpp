@@ -397,14 +397,14 @@ TEST(RequestQueue, FairMaxNewQueryStartsAtHighestService)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2, 3}));
 }
 
-/// fair-tier: B arrives while tier 0 is still the lowest active tier, so B joins tier 0. After A's
+/// fair-tier-5: B arrives while tier 0 is still the lowest active tier, so B joins tier 0. After A's
 /// attained CPU crosses one 5-second tier, B's still-lower tier is served before A's next request.
 TEST(RequestQueue, FairTierYieldsAfterStep)
 {
-    Fixture f(SchedulerAlgorithm::FairTier, CostUnit::CPUNanosecond);
+    Fixture f(SchedulerAlgorithm::FairTier5, CostUnit::CPUNanosecond);
     auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
     auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
-    f.enqueue(1, a, FairTierAlgorithm::tier_cost);
+    f.enqueue(1, a, FairTierAlgorithm::tier_5_cost);
     f.enqueue(2, a, 1);
     f.enqueue(3, b, 1);
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2}));
@@ -414,13 +414,13 @@ TEST(RequestQueue, FairTierYieldsAfterStep)
 /// It does not start at 0 and preempt the query that is still in service.
 TEST(RequestQueue, FairTierNewQueryJoinsLowestActiveTier)
 {
-    Fixture f(SchedulerAlgorithm::FairTier, CostUnit::CPUNanosecond);
+    Fixture f(SchedulerAlgorithm::FairTier5, CostUnit::CPUNanosecond);
     auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
     auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
-    f.enqueue(1, a, FairTierAlgorithm::tier_cost);
+    f.enqueue(1, a, FairTierAlgorithm::tier_5_cost);
     auto [served, _] = f.queue->dequeueRequest();
     ASSERT_EQ(static_cast<TestRequest *>(served)->id, 1);
-    EXPECT_EQ(f.attainedOf(a), FairTierAlgorithm::tier_cost);
+    EXPECT_EQ(f.attainedOf(a), FairTierAlgorithm::tier_5_cost);
     f.enqueue(2, b, 1); // queue is empty; A is in service at tier 1, so B joins tier 1
     f.enqueue(3, a, 1);
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{3, 2}));
@@ -430,7 +430,7 @@ TEST(RequestQueue, FairTierNewQueryJoinsLowestActiveTier)
 /// even when the later arrival was queued between them.
 TEST(RequestQueue, FairTierKeepsFcfsInsideTier)
 {
-    Fixture f(SchedulerAlgorithm::FairTier, CostUnit::CPUNanosecond);
+    Fixture f(SchedulerAlgorithm::FairTier5, CostUnit::CPUNanosecond);
     auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
     auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
     f.enqueue(1, a, 1);
@@ -438,6 +438,32 @@ TEST(RequestQueue, FairTierKeepsFcfsInsideTier)
     f.enqueue(3, a, 1);
     f.enqueue(4, b, 1);
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2, 4}));
+}
+
+/// `fair-tier-10` does not cross a tier at 5 seconds. A and B stay in one tier, so the earlier
+/// query keeps FCFS order through both of its requests.
+TEST(RequestQueue, FairTier10StaysInTierThroughFiveSeconds)
+{
+    Fixture f(SchedulerAlgorithm::FairTier10, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, FairTierAlgorithm::tier_5_cost);
+    f.enqueue(2, a, 1);
+    f.enqueue(3, b, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2, 3}));
+}
+
+/// `fair-tier-10` yields once attained service crosses 10 seconds. B, still in the lower tier, is
+/// served before A's next request.
+TEST(RequestQueue, FairTier10YieldsAfterTenSeconds)
+{
+    Fixture f(SchedulerAlgorithm::FairTier10, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, FairTierAlgorithm::tier_10_cost);
+    f.enqueue(2, a, 1);
+    f.enqueue(3, b, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2}));
 }
 
 /// srpt: lower expected remaining CPU time is served first, with FIFO for equal keys.
@@ -658,7 +684,7 @@ TEST(RequestQueue, SwapThroughAllSchedulersKeepsRequests)
     auto * a = f.makeQuery();
     for (int i = 1; i <= 4; ++i)
         f.enqueue(i, a);
-    for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier,
+    for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10,
                       SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins,
                       SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Srpt,
                       SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
@@ -727,7 +753,7 @@ TEST(RequestQueue, LasRekeySeesPendingCorrection)
 TEST(RequestQueue, CancelFromMiddle)
 {
     for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
-                      SchedulerAlgorithm::FairTier, SchedulerAlgorithm::Las,
+                      SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
         Fixture f(algo, algo == SchedulerAlgorithm::Srpt ? CostUnit::CPUNanosecond : CostUnit::IOByte);
@@ -747,7 +773,7 @@ TEST(RequestQueue, CancelFromMiddle)
 TEST(RequestQueue, MaxWaitingQueries)
 {
     for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
-                      SchedulerAlgorithm::FairTier, SchedulerAlgorithm::Las,
+                      SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
         Fixture f(
@@ -903,7 +929,7 @@ TEST(RequestQueue, FairUsesSchedulingCostNotBudgetAdjustedCost)
 TEST(RequestQueue, AttainedChargedForEveryAlgorithm)
 {
     for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
-                      SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier,
+                      SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10,
                       SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins,
                       SchedulerAlgorithm::Srpt})
     {
