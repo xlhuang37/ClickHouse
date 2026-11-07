@@ -46,6 +46,8 @@ enum class SchedulerAlgorithm
     MemGittinsRaw, /// Memory-conditional Gittins index, ordered by the raw index
     Priority, /// Strict priority by the query's `priority` setting (lower value first; can starve)
     Srpt, /// Shortest Remaining Response Time from expected runtime minus attained CPU service
+    FairMax, /// New queries start at the highest attained service; less-served queries stay ahead
+    FairTier, /// FCFS by query start inside fixed 5-second attained-service tiers
 };
 
 inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
@@ -68,10 +70,14 @@ inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
         return SchedulerAlgorithm::Priority;
     if (name == "srpt")
         return SchedulerAlgorithm::Srpt;
+    if (name == "fair-max")
+        return SchedulerAlgorithm::FairMax;
+    if (name == "fair-tier")
+        return SchedulerAlgorithm::FairTier;
     throw Exception(
         ErrorCodes::BAD_ARGUMENTS,
         "Unknown workload scheduler '{}' (expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins', "
-        "'gittins-raw', 'mem-gittins-raw', 'priority' or 'srpt')",
+        "'gittins-raw', 'mem-gittins-raw', 'priority', 'srpt', 'fair-max' or 'fair-tier')",
         name);
 }
 
@@ -329,6 +335,101 @@ private:
     Set requests;
 };
 
+/// `fair-max` — a query's virtual time starts at the highest attained service in the queue, then
+/// grows by each request's declared cost. Lower virtual time is served first, and an equal value
+/// joins the tail. A query that has been served less stays ahead of one that has caught the
+/// maximum. Weight and weight lowering are not applied. `pop` does not move the system value.
+class FairMaxAlgorithm final : public ISchedulingAlgorithm
+{
+public:
+    void push(ResourceRequest * request) override
+    {
+        chassert(request->scheduling.context);
+        auto & state = request->scheduling.state->fair_max;
+        if (!state.initialized)
+        {
+            state.vruntime = system_vruntime;
+            state.initialized = true;
+        }
+        const double vstart = state.vruntime;
+        const double increment = static_cast<double>(request->scheduling.cost);
+        state.vruntime += increment;
+        if (state.vruntime > system_vruntime)
+            system_vruntime = state.vruntime;
+        request->scheduling.vruntime_increment = increment;
+        request->scheduling.key = {vstart, next_seq++};
+        requests.insert(*request);
+    }
+
+    ResourceRequest * pop() override
+    {
+        if (requests.empty())
+            return nullptr;
+        auto it = requests.begin();
+        ResourceRequest * request = &*it;
+        requests.erase(it);
+        return request;
+    }
+
+    bool erase(ResourceRequest * request) override
+    {
+        if (!request->scheduling_hook.is_linked())
+            return false;
+        requests.erase(requests.iterator_to(*request));
+        rollbackProjection(request);
+        return true;
+    }
+
+    ResourceRequest * popWorst() override
+    {
+        if (requests.empty())
+            return nullptr;
+        auto it = std::prev(requests.end());
+        ResourceRequest * request = &*it;
+        requests.erase(it);
+        rollbackProjection(request);
+        return request;
+    }
+
+    void pullAll(ResourceRequest::EnqueuedList & out) noexcept override
+    {
+        while (!requests.empty())
+        {
+            ResourceRequest & request = *requests.begin();
+            requests.erase(requests.begin());
+            out.push_back(request);
+        }
+    }
+
+    void reset() noexcept override
+    {
+        chassert(requests.empty());
+        system_vruntime = 0.0;
+        next_seq = 0;
+    }
+
+    bool empty() const override { return requests.empty(); }
+
+private:
+    static void rollbackProjection(ResourceRequest * request)
+    {
+        request->scheduling.state->fair_max.vruntime -= request->scheduling.vruntime_increment;
+    }
+
+    struct ByKey
+    {
+        bool operator()(const ResourceRequest & lhs, const ResourceRequest & rhs) const noexcept
+        {
+            return lhs.scheduling.key < rhs.scheduling.key;
+        }
+    };
+    using Set = boost::intrusive::set<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByKey>>;
+
+    double system_vruntime = 0.0;
+    UInt64 next_seq = 0;
+    Set requests;
+};
+
 /// `las` — practical Least-Attained-Service, MLFQ-bucketed. Serves the query that has attained the
 /// least service in this resource first (best mean latency under heavy-tailed query sizes),
 /// coarsened into geometric levels (`level = floor(log2(1 + attained/base))`) so a query drops one
@@ -451,6 +552,109 @@ private:
     using Set = boost::intrusive::set<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByKey>>;
 
     const ResourceCost base;
+    UInt64 next_seq = 0;
+    Set requests;
+};
+
+/// `fair-tier` — first-come, first-served inside fixed attained-service tiers of
+/// `5'000'000'000` cost units (5 CPU-seconds, or 5 GiB on an IO resource). A lower tier is served
+/// first. Within a tier, an earlier query `start_ns` stays ahead of a later arrival, including
+/// after a requeue. Once attained service crosses into the next tier, a queued request is re-keyed
+/// and yields to queries that are still in an earlier tier.
+class FairTierAlgorithm final : public ISchedulingAlgorithm
+{
+public:
+    static constexpr ResourceCost tier_cost = 5'000'000'000;
+
+    void push(ResourceRequest * request) override
+    {
+        chassert(request->scheduling.context);
+        const Int64 attained = request->scheduling.state->attained_cost.load(std::memory_order_relaxed);
+        request->scheduling.key = {tierOf(attained), next_seq++};
+        requests.insert(*request);
+    }
+
+    ResourceRequest * pop() override
+    {
+        while (!requests.empty())
+        {
+            auto it = requests.begin();
+            ResourceRequest * request = &*it;
+            const double real_tier = tierOf(request->scheduling.state->attained_cost.load(std::memory_order_relaxed));
+            if (real_tier > request->scheduling.key.first)
+            {
+                requests.erase(it);
+                request->scheduling.key.first = real_tier;
+                requests.insert(*request);
+                continue;
+            }
+            requests.erase(it);
+            return request;
+        }
+        return nullptr;
+    }
+
+    bool erase(ResourceRequest * request) override
+    {
+        if (!request->scheduling_hook.is_linked())
+            return false;
+        requests.erase(requests.iterator_to(*request));
+        return true;
+    }
+
+    ResourceRequest * popWorst() override
+    {
+        if (requests.empty())
+            return nullptr;
+        auto it = std::prev(requests.end());
+        ResourceRequest * request = &*it;
+        requests.erase(it);
+        return request;
+    }
+
+    void pullAll(ResourceRequest::EnqueuedList & out) noexcept override
+    {
+        while (!requests.empty())
+        {
+            ResourceRequest & request = *requests.begin();
+            requests.erase(requests.begin());
+            out.push_back(request);
+        }
+    }
+
+    void reset() noexcept override
+    {
+        chassert(requests.empty());
+        next_seq = 0;
+    }
+
+    bool empty() const override { return requests.empty(); }
+
+private:
+    static double tierOf(Int64 attained)
+    {
+        if (attained <= 0)
+            return 0;
+        return static_cast<double>(static_cast<UInt64>(attained) / static_cast<UInt64>(tier_cost));
+    }
+
+    /// Tier, then query start time, then insertion sequence. The sequence only separates requests
+    /// that share a start time; a fresh sequence must not put an early query behind a later one.
+    struct ByTierAndStart
+    {
+        bool operator()(const ResourceRequest & lhs, const ResourceRequest & rhs) const noexcept
+        {
+            if (lhs.scheduling.key.first != rhs.scheduling.key.first)
+                return lhs.scheduling.key.first < rhs.scheduling.key.first;
+            const UInt64 lhs_start = lhs.scheduling.context ? lhs.scheduling.context->start_ns : 0;
+            const UInt64 rhs_start = rhs.scheduling.context ? rhs.scheduling.context->start_ns : 0;
+            if (lhs_start != rhs_start)
+                return lhs_start < rhs_start;
+            return lhs.scheduling.key.second < rhs.scheduling.key.second;
+        }
+    };
+    using Set = boost::intrusive::set<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByTierAndStart>>;
+
     UInt64 next_seq = 0;
     Set requests;
 };
@@ -992,6 +1196,14 @@ public:
         if (new_algorithm == SchedulerAlgorithm::Fair)
             for (ResourceRequest & request : pending)
                 request.scheduling.state->fair.vruntime = 0.0;
+        // Same for `fair-max`: `reset` restarts the system value at 0, so a moved query must be
+        // initialized again instead of keeping a projection from the previous algorithm instance.
+        if (new_algorithm == SchedulerAlgorithm::FairMax)
+            for (ResourceRequest & request : pending)
+            {
+                request.scheduling.state->fair_max.vruntime = 0.0;
+                request.scheduling.state->fair_max.initialized = false;
+            }
         while (!pending.empty())
         {
             ResourceRequest & request = pending.front();
@@ -1048,6 +1260,8 @@ private:
             case SchedulerAlgorithm::MemGittinsRaw: return mem_gittins_raw_algorithm;
             case SchedulerAlgorithm::Priority: return priority_algorithm;
             case SchedulerAlgorithm::Srpt: return srpt_algorithm;
+            case SchedulerAlgorithm::FairMax: return fair_max_algorithm;
+            case SchedulerAlgorithm::FairTier: return fair_tier_algorithm;
         }
         UNREACHABLE();
     }
@@ -1087,6 +1301,8 @@ private:
     GittinsAlgorithm mem_gittins_raw_algorithm;
     PriorityAlgorithm priority_algorithm;
     SrptAlgorithm srpt_algorithm;
+    FairMaxAlgorithm fair_max_algorithm;
+    FairTierAlgorithm fair_tier_algorithm;
     Int64 max_queued;
     SchedulerAlgorithm algorithm;
     ISchedulingAlgorithm * algo;

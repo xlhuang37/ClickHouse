@@ -24,6 +24,8 @@ class LasAlgorithm;
 class GittinsAlgorithm;
 class PriorityAlgorithm;
 class SrptAlgorithm;
+class FairMaxAlgorithm;
+class FairTierAlgorithm;
 class CPUSlotsAllocation;
 class ResourceSchedulingContext;
 struct ResourceQueryState;
@@ -96,18 +98,20 @@ public:
         ResourceQueryState * state = &default_scheduling_state;
 
         /// Ordering key for schedulers backed by the intrusive ordered set. `.first` is the virtual
-        /// runtime (`fair`), MLFQ level (`las`), or remaining service (`srpt`); `.second` is a
-        /// monotonic sequence number for a stable FIFO tie-break (also used by `priority`).
+        /// runtime (`fair`, `fair-max`), MLFQ level (`las`), attained-service tier (`fair-tier`),
+        /// or remaining service (`srpt`); `.second` is a monotonic sequence number for a stable
+        /// tie-break (also used by `priority`). `fair-tier` orders an equal tier by query start
+        /// time before this sequence.
         std::pair<double, UInt64> key{0.0, 0};
 
         /// Ordering key for the `priority` scheduler (lower value first, then `key.second` for FIFO).
         /// Set at enqueue from the query's `workload_priority` setting (`Int64`, negatives allowed).
         Priority priority;
 
-        /// `fair` only: the virtual-runtime increment this request added to its query at push
-        /// (`charge / effective_weight`). Kept so cancelling a still-queued request can subtract it
-        /// back out — otherwise the query is charged for service it never received, delaying its
-        /// future requests. Zero for the other algorithms.
+        /// `fair` and `fair-max`: the virtual-runtime increment this request added to its query at
+        /// push (`charge / effective_weight` for `fair`, the declared cost for `fair-max`). Kept so
+        /// cancelling a still-queued request can subtract it back out — otherwise the query is
+        /// charged for service it never received, delaying its future requests. Zero otherwise.
         double vruntime_increment = 0.0;
     } scheduling;
 
@@ -170,6 +174,8 @@ private:
     friend class GittinsAlgorithm; // uses `scheduling_hook` + `scheduling.key`
     friend class PriorityAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `priority` scheduler
     friend class SrptAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `srpt` scheduler
+    friend class FairMaxAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fair-max` scheduler
+    friend class FairTierAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fair-tier` scheduler
     friend class RequestQueue;
     friend class CPUSlotsAllocation; // hack for tests only
 

@@ -384,6 +384,46 @@ TEST(RequestQueue, LasRekeysStaleRequestsOnPop)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 9, 2, 3}));
 }
 
+/// fair-max: a new query starts at the highest virtual time already projected, so it does not
+/// run ahead of a request the earlier query has already queued.
+TEST(RequestQueue, FairMaxNewQueryStartsAtHighestService)
+{
+    Fixture f(SchedulerAlgorithm::FairMax, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, 100); // A1 keys at 0 and projects A's virtual time to 100
+    f.enqueue(2, a, 1);   // A2 is already queued at 100
+    f.enqueue(3, b, 1);   // B starts at the system value, 101, behind A2
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2, 3}));
+}
+
+/// fair-tier: after A's attained CPU crosses one 5-second tier, B's still-lower tier is served
+/// before A's next request.
+TEST(RequestQueue, FairTierYieldsAfterStep)
+{
+    Fixture f(SchedulerAlgorithm::FairTier, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, FairTierAlgorithm::tier_cost);
+    f.enqueue(2, a, 1);
+    f.enqueue(3, b, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2}));
+}
+
+/// Inside one tier, the earlier query keeps both of its requests ahead of a later arrival,
+/// even when the later arrival was queued between them.
+TEST(RequestQueue, FairTierKeepsFcfsInsideTier)
+{
+    Fixture f(SchedulerAlgorithm::FairTier, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, 1);
+    f.enqueue(2, b, 1);
+    f.enqueue(3, a, 1);
+    f.enqueue(4, b, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2, 4}));
+}
+
 /// srpt: lower expected remaining CPU time is served first, with FIFO for equal keys.
 TEST(RequestQueue, SrptOrdersByExpectedRuntime)
 {
@@ -602,7 +642,8 @@ TEST(RequestQueue, SwapThroughAllSchedulersKeepsRequests)
     auto * a = f.makeQuery();
     for (int i = 1; i <= 4; ++i)
         f.enqueue(i, a);
-    for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins,
+    for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier,
+                      SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins,
                       SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Srpt,
                       SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
         f.queue->setScheduler(algo);
@@ -669,7 +710,8 @@ TEST(RequestQueue, LasRekeySeesPendingCorrection)
 /// Cancellation from the middle works for both algorithms; counters update.
 TEST(RequestQueue, CancelFromMiddle)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
+                      SchedulerAlgorithm::FairTier, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
         Fixture f(algo, algo == SchedulerAlgorithm::Srpt ? CostUnit::CPUNanosecond : CostUnit::IOByte);
@@ -688,7 +730,8 @@ TEST(RequestQueue, CancelFromMiddle)
 /// max_waiting_queries is enforced on the total pending count for both algorithms.
 TEST(RequestQueue, MaxWaitingQueries)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
+                      SchedulerAlgorithm::FairTier, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
         Fixture f(
@@ -844,6 +887,7 @@ TEST(RequestQueue, FairUsesSchedulingCostNotBudgetAdjustedCost)
 TEST(RequestQueue, AttainedChargedForEveryAlgorithm)
 {
     for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
+                      SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier,
                       SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins,
                       SchedulerAlgorithm::Srpt})
     {

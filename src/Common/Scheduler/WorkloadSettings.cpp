@@ -288,11 +288,12 @@ void WorkloadSettings::initFromChanges(const ASTCreateWorkloadQuery::SettingsCha
                 if (*scheduler != "fifo" && *scheduler != "fair" && *scheduler != "las"
                     && *scheduler != "gittins" && *scheduler != "mem-gittins"
                     && *scheduler != "gittins-raw" && *scheduler != "mem-gittins-raw"
-                    && *scheduler != "priority" && *scheduler != "srpt")
+                    && *scheduler != "priority" && *scheduler != "srpt"
+                    && *scheduler != "fair-max" && *scheduler != "fair-tier")
                     throw Exception(ErrorCodes::BAD_ARGUMENTS,
                         "Unknown workload setting 'scheduler' value '{}' "
                         "(expected 'fifo', 'fair', 'las', 'gittins', 'mem-gittins', 'gittins-raw', "
-                        "'mem-gittins-raw', 'priority' or 'srpt')",
+                        "'mem-gittins-raw', 'priority', 'srpt', 'fair-max' or 'fair-tier')",
                         *scheduler);
             }
             else if (name == "max_io_requests" || name == "max_requests")

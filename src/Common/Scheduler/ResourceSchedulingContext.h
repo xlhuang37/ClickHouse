@@ -60,6 +60,15 @@ struct ResourceQueryState
             return static_cast<ResourceCost>(effective - remainder); // >= 0
         }
     } fair;
+
+    /// `fair-max` only (leaf thread). A query's virtual time is the queue's highest attained
+    /// service the first time it is seen, then each pushed request adds its declared cost.
+    /// Separate from `fair.vruntime`, which follows start-time fair queueing.
+    struct
+    {
+        double vruntime = 0.0;
+        bool initialized = false;
+    } fair_max;
 };
 
 /// Per-query scheduling context: the query-global config the schedulers read (weight, thresholds,
