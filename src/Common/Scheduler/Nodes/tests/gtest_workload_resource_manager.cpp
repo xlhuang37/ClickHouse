@@ -23,6 +23,7 @@
 #include <Common/WakeupFd.h>
 #include <Common/Scheduler/CPUSlotsAllocation.h>
 #include <Common/Scheduler/CPULeaseAllocation.h>
+#include <Common/Scheduler/ResourceSchedulingContext.h>
 #include <Common/Scheduler/ISpaceSharedNode.h>
 #include <Common/Scheduler/MemoryReservation.h>
 #include <Common/Scheduler/Nodes/SpaceShared/AllocationQueue.h>
@@ -4655,6 +4656,11 @@ TEST(SchedulerWorkloadResourceManager, PreemptiveCPUSchedulingLazyStartsAtInitia
 
         // No pending request either — the chain stopped after the first grant.
         EXPECT_FALSE(lease->isRequesting());
+
+        // The constructor's first enqueue publishes the starting ceiling onto the query state.
+        ASSERT_NE(master_link.scheduling_state, &default_scheduling_state);
+        EXPECT_EQ(master_link.scheduling_state->max_cpu_slots.load(), 1);
+        EXPECT_EQ(worker_link.scheduling_state->max_cpu_slots.load(), 1);
     });
 
     t.wait();
@@ -4679,6 +4685,10 @@ TEST(SchedulerWorkloadResourceManager, PreemptiveCPUSchedulingLazySetMaxGrows)
         // additional capacity; the grant chain in grantImpl then fills up to
         // current_max_slots=4 one request at a time.
         lease->setMax(4);
+        // setMax publishes even before the extra grants arrive. Master and worker share this resource,
+        // so both links point at the same per-query state.
+        EXPECT_EQ(master_link.scheduling_state->max_cpu_slots.load(), 4);
+        EXPECT_EQ(worker_link.scheduling_state->max_cpu_slots.load(), 4);
 
         // Wait for three more slots to land (one per additional grant). We
         // accumulate them so they don't trigger consume() during teardown.

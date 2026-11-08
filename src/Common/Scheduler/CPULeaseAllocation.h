@@ -372,6 +372,10 @@ private:
         void finish();
         void granted();
         bool enqueue(ResourceCost cost, ResourceCost requested_ns_);
+        /// Store `max_slots` into the master and worker links' per-query scheduling state.
+        /// Skips a link that still points at the shared fallback state. Both links receive the same
+        /// query-wide ceiling; it is not split into a master cap and a worker cap.
+        void publishMaxCpuSlots(SlotCount max_slots) const;
         /// Returns true if the pending request was removed before the scheduler processed it
         bool cancel(std::unique_lock<std::mutex> & lock);
         void scheduled();

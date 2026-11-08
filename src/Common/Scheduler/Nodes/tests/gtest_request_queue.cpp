@@ -116,6 +116,206 @@ TEST(RequestQueue, FifoOrder)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2, 3, 4}));
 }
 
+/// fcfs: the sequence is assigned when a query first submits, and every request of that query
+/// keeps it. A's clock is later than B's, but A submitted first, so both of A's requests stay
+/// ahead of B. A's grants also hold the leaf until both have finished.
+TEST(RequestQueue, FcfsOrdersByQuerySequence)
+{
+    Fixture f(SchedulerAlgorithm::Fcfs, CostUnit::CPUNanosecond);
+    auto * first = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/100);
+    auto * second = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    f.enqueue(1, first, 1'000'000'000);
+    f.enqueue(2, second, 1); // submitted after A, despite the earlier clock
+    f.enqueue(3, first, 1); // same sequence as id 1, so still ahead of B
+    f.enqueue(4, second, 1);
+
+    auto [first_grant, active_after_first] = f.queue->dequeueRequest();
+    ASSERT_EQ(static_cast<TestRequest *>(first_grant)->id, 1);
+    auto [second_grant, active_after_second] = f.queue->dequeueRequest();
+    ASSERT_EQ(static_cast<TestRequest *>(second_grant)->id, 3);
+    (void)active_after_first;
+    (void)active_after_second;
+    // Both of the first query's grants are outstanding, so the second query is not admitted.
+    auto [blocked, active_while_held] = f.queue->dequeueRequest();
+    (void)active_while_held;
+    EXPECT_EQ(blocked, nullptr);
+
+    first_grant->finish();
+    auto [still_blocked, active_after_one_finish] = f.queue->dequeueRequest();
+    (void)active_after_one_finish;
+    EXPECT_EQ(still_blocked, nullptr);
+    second_grant->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2, 4}));
+}
+
+/// Requests of one query share its sequence, so the first query's later request stays ahead of
+/// the second query. The second query stays queued while the first query's grants are outstanding.
+TEST(RequestQueue, FcfsSameQuerySharesSequence)
+{
+    Fixture f(SchedulerAlgorithm::Fcfs);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/5);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/5);
+    f.enqueue(1, a);
+    f.enqueue(2, b);
+    f.enqueue(3, a);
+
+    auto [first, active_after_first] = f.queue->dequeueRequest();
+    auto [second, active_after_second] = f.queue->dequeueRequest();
+    (void)active_after_first;
+    (void)active_after_second;
+    EXPECT_EQ(static_cast<TestRequest *>(first)->id, 1);
+    EXPECT_EQ(static_cast<TestRequest *>(second)->id, 3);
+    auto [blocked, active_while_held] = f.queue->dequeueRequest();
+    (void)active_while_held;
+    EXPECT_EQ(blocked, nullptr);
+
+    first->finish();
+    second->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
+}
+
+namespace
+{
+void setMaxCpuSlots(ResourceSchedulingContext * ctx, UInt64 slots)
+{
+    ctx->resourceState(0)->max_cpu_slots.store(slots, std::memory_order_release);
+}
+}
+
+/// `if-fcfs`: a ceiling of 1 is served before a ceiling of 8 that was submitted earlier.
+TEST(RequestQueue, IfFcfsPrivilegedAheadOfWide)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * wide = f.makeQuery();
+    auto * small = f.makeQuery();
+    setMaxCpuSlots(wide, 8);
+    setMaxCpuSlots(small, 1);
+    f.enqueue(1, wide);
+    f.enqueue(2, small);
+
+    auto [first, active] = f.queue->dequeueRequest();
+    (void)active;
+    ASSERT_EQ(static_cast<TestRequest *>(first)->id, 2);
+    first->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1}));
+}
+
+/// A ceiling of 4 is still privileged. Two privileged queries stay in submission order, and the
+/// earlier grant holds the later one.
+TEST(RequestQueue, IfFcfsPrivilegedOrderedBySequence)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * first_query = f.makeQuery();
+    auto * second_query = f.makeQuery();
+    setMaxCpuSlots(first_query, 1);
+    setMaxCpuSlots(second_query, 4);
+    f.enqueue(1, first_query);
+    f.enqueue(2, second_query);
+    f.enqueue(3, first_query);
+
+    auto [first, active_after_first] = f.queue->dequeueRequest();
+    auto [second, active_after_second] = f.queue->dequeueRequest();
+    (void)active_after_first;
+    (void)active_after_second;
+    EXPECT_EQ(static_cast<TestRequest *>(first)->id, 1);
+    EXPECT_EQ(static_cast<TestRequest *>(second)->id, 3);
+    auto [blocked, active_while_held] = f.queue->dequeueRequest();
+    (void)active_while_held;
+    EXPECT_EQ(blocked, nullptr);
+
+    first->finish();
+    second->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
+}
+
+/// An unpublished ceiling (0) stays in the normal class, so it does not jump a wider query.
+TEST(RequestQueue, IfFcfsUnpublishedDoesNotJump)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * wide = f.makeQuery();
+    auto * unpublished = f.makeQuery();
+    setMaxCpuSlots(wide, 8);
+    f.enqueue(1, wide);
+    f.enqueue(2, unpublished);
+
+    auto [first, active] = f.queue->dequeueRequest();
+    (void)active;
+    ASSERT_EQ(static_cast<TestRequest *>(first)->id, 1);
+    first->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
+}
+
+/// Growing a queued query's ceiling past 4 demotes it behind a query that is still at 4.
+TEST(RequestQueue, IfFcfsDemotesWhenCeilingGrows)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * grown = f.makeQuery();
+    auto * still_small = f.makeQuery();
+    setMaxCpuSlots(grown, 4);
+    setMaxCpuSlots(still_small, 4);
+    f.enqueue(1, grown);
+    f.enqueue(2, still_small);
+    setMaxCpuSlots(grown, 5);
+
+    auto [first, active] = f.queue->dequeueRequest();
+    (void)active;
+    ASSERT_EQ(static_cast<TestRequest *>(first)->id, 2);
+    first->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1}));
+}
+
+/// A granted quantum of a wide query does not block a privileged query that arrives later.
+TEST(RequestQueue, IfFcfsPrivilegedNotBlockedByWideInflight)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * wide = f.makeQuery();
+    auto * small = f.makeQuery();
+    setMaxCpuSlots(wide, 8);
+    setMaxCpuSlots(small, 2);
+    f.enqueue(1, wide);
+    auto [wide_grant, active_after_wide] = f.queue->dequeueRequest();
+    (void)active_after_wide;
+    ASSERT_EQ(static_cast<TestRequest *>(wide_grant)->id, 1);
+
+    f.enqueue(2, small);
+    auto [small_grant, active_after_small] = f.queue->dequeueRequest();
+    (void)active_after_small;
+    ASSERT_NE(small_grant, nullptr);
+    EXPECT_EQ(static_cast<TestRequest *>(small_grant)->id, 2);
+
+    wide_grant->finish();
+    small_grant->finish();
+}
+
+/// A privileged grant blocks a later privileged query and the normal class until it finishes.
+TEST(RequestQueue, IfFcfsPrivilegedInflightBlocksLaterArrivals)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * first_small = f.makeQuery();
+    auto * second_small = f.makeQuery();
+    auto * wide = f.makeQuery();
+    setMaxCpuSlots(first_small, 1);
+    setMaxCpuSlots(second_small, 2);
+    setMaxCpuSlots(wide, 8);
+    f.enqueue(1, first_small);
+    auto [grant, active_after_grant] = f.queue->dequeueRequest();
+    (void)active_after_grant;
+    ASSERT_EQ(static_cast<TestRequest *>(grant)->id, 1);
+
+    f.enqueue(2, second_small);
+    f.enqueue(3, wide);
+    auto [blocked, active_while_held] = f.queue->dequeueRequest();
+    (void)active_while_held;
+    EXPECT_EQ(blocked, nullptr);
+
+    grant->finish();
+    auto [next, active_after_finish] = f.queue->dequeueRequest();
+    (void)active_after_finish;
+    ASSERT_EQ(static_cast<TestRequest *>(next)->id, 2);
+    next->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{3}));
+}
+
 /// fair, equal weights: two queries are interleaved fairly (SFQ round-robin).
 TEST(RequestQueue, FairEqualWeightInterleave)
 {
@@ -384,6 +584,88 @@ TEST(RequestQueue, LasRekeysStaleRequestsOnPop)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 9, 2, 3}));
 }
 
+/// fair-max: a new query starts at the highest virtual time already projected, so it does not
+/// run ahead of a request the earlier query has already queued.
+TEST(RequestQueue, FairMaxNewQueryStartsAtHighestService)
+{
+    Fixture f(SchedulerAlgorithm::FairMax, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, 100); // A1 keys at 0 and projects A's virtual time to 100
+    f.enqueue(2, a, 1);   // A2 is already queued at 100
+    f.enqueue(3, b, 1);   // B starts at the system value, 101, behind A2
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2, 3}));
+}
+
+/// fair-tier-5: B arrives while tier 0 is still the lowest active tier, so B joins tier 0. After A's
+/// attained CPU crosses one 5-second tier, B's still-lower tier is served before A's next request.
+TEST(RequestQueue, FairTierYieldsAfterStep)
+{
+    Fixture f(SchedulerAlgorithm::FairTier5, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, FairTierAlgorithm::tier_5_cost);
+    f.enqueue(2, a, 1);
+    f.enqueue(3, b, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2}));
+}
+
+/// A query that arrives after another query has already crossed a tier joins that query's tier.
+/// It does not start at 0 and preempt the query that is still in service.
+TEST(RequestQueue, FairTierNewQueryJoinsLowestActiveTier)
+{
+    Fixture f(SchedulerAlgorithm::FairTier5, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, FairTierAlgorithm::tier_5_cost);
+    auto [served, _] = f.queue->dequeueRequest();
+    ASSERT_EQ(static_cast<TestRequest *>(served)->id, 1);
+    EXPECT_EQ(f.attainedOf(a), FairTierAlgorithm::tier_5_cost);
+    f.enqueue(2, b, 1); // queue is empty; A is in service at tier 1, so B joins tier 1
+    f.enqueue(3, a, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{3, 2}));
+}
+
+/// Inside one tier the only FCFS key is the query sequence. A submitted first, so both of its
+/// requests stay ahead of B even though B's clock is earlier and B was queued between them.
+TEST(RequestQueue, FairTierKeepsFcfsInsideTier)
+{
+    Fixture f(SchedulerAlgorithm::FairTier5, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/100);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    f.enqueue(1, a, 1);
+    f.enqueue(2, b, 1);
+    f.enqueue(3, a, 1);
+    f.enqueue(4, b, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2, 4}));
+}
+
+/// `fair-tier-10` does not cross a tier at 5 seconds. A and B stay in one tier, so the earlier
+/// query keeps FCFS order through both of its requests.
+TEST(RequestQueue, FairTier10StaysInTierThroughFiveSeconds)
+{
+    Fixture f(SchedulerAlgorithm::FairTier10, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, FairTierAlgorithm::tier_5_cost);
+    f.enqueue(2, a, 1);
+    f.enqueue(3, b, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 2, 3}));
+}
+
+/// `fair-tier-10` yields once attained service crosses 10 seconds. B, still in the lower tier, is
+/// served before A's next request.
+TEST(RequestQueue, FairTier10YieldsAfterTenSeconds)
+{
+    Fixture f(SchedulerAlgorithm::FairTier10, CostUnit::CPUNanosecond);
+    auto * a = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/1);
+    auto * b = f.makeQuery(1.0, 1.0, 0, 0, 0, /*start_ns=*/2);
+    f.enqueue(1, a, FairTierAlgorithm::tier_10_cost);
+    f.enqueue(2, a, 1);
+    f.enqueue(3, b, 1);
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1, 3, 2}));
+}
+
 /// srpt: lower expected remaining CPU time is served first, with FIFO for equal keys.
 TEST(RequestQueue, SrptOrdersByExpectedRuntime)
 {
@@ -602,9 +884,10 @@ TEST(RequestQueue, SwapThroughAllSchedulersKeepsRequests)
     auto * a = f.makeQuery();
     for (int i = 1; i <= 4; ++i)
         f.enqueue(i, a);
-    for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins,
+    for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10,
+                      SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins,
                       SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Srpt,
-                      SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
+                      SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::IfFcfs, SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
         f.queue->setScheduler(algo);
     auto [len, cost] = f.queue->getQueueLengthAndCost();
     EXPECT_EQ(len, 4u);
@@ -669,7 +952,8 @@ TEST(RequestQueue, LasRekeySeesPendingCorrection)
 /// Cancellation from the middle works for both algorithms; counters update.
 TEST(RequestQueue, CancelFromMiddle)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::IfFcfs, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
+                      SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
         Fixture f(algo, algo == SchedulerAlgorithm::Srpt ? CostUnit::CPUNanosecond : CostUnit::IOByte);
@@ -688,7 +972,8 @@ TEST(RequestQueue, CancelFromMiddle)
 /// max_waiting_queries is enforced on the total pending count for both algorithms.
 TEST(RequestQueue, MaxWaitingQueries)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair, SchedulerAlgorithm::Las,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::IfFcfs, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
+                      SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
         Fixture f(
@@ -843,7 +1128,8 @@ TEST(RequestQueue, FairUsesSchedulingCostNotBudgetAdjustedCost)
 /// no longer depends on which algorithm is (or was) active.
 TEST(RequestQueue, AttainedChargedForEveryAlgorithm)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::IfFcfs, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
+                      SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10,
                       SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins,
                       SchedulerAlgorithm::Srpt})
     {

@@ -33,6 +33,13 @@ struct ResourceQueryState
     /// keyed. Kept in the scheduling state so the policy hot path does not need a query lookup.
     std::atomic<Int64> memory_usage{0};
 
+    /// CPU slot ceiling this query is allowed to hold (`CPULeaseAllocation::current_max_slots`).
+    /// Published by the allocation on enqueue and on `setMax`. `0` means the query has not published
+    /// a ceiling (IO requests, unclassified requests, and non-preemptive CPU slots). `if-fcfs` treats
+    /// 1, 2, 3, and 4 as the privileged class. Release/acquire: the pipeline thread stores it and the leaf
+    /// reads it without holding the allocation mutex.
+    std::atomic<UInt64> max_cpu_slots{0};
+
     /// `fair`-only state (leaf thread only), grouped so the other algorithms don't touch it: SFQ
     /// virtual runtime; a cached effective weight with a one-way latch (`effective_weight` is
     /// finalized on the first push when lowering is disabled, otherwise recomputed each push until a
@@ -60,6 +67,36 @@ struct ResourceQueryState
             return static_cast<ResourceCost>(effective - remainder); // >= 0
         }
     } fair;
+
+    /// `fair-max` only (leaf thread). A query's virtual time is the queue's highest attained
+    /// service the first time it is seen, then each pushed request adds its declared cost.
+    /// Separate from `fair.vruntime`, which follows start-time fair queueing.
+    struct
+    {
+        double vruntime = 0.0;
+        bool initialized = false;
+    } fair_max;
+
+    /// `fair-tier-5` and `fair-tier-10` only (leaf thread). `base_tier` is the lowest tier active in
+    /// the queue when this query was first seen. The query's tier is `base_tier` plus one step per
+    /// 5 or 10 seconds of its own attained service, so a new query joins the current step instead of
+    /// starting at 0.
+    struct
+    {
+        double base_tier = 0.0;
+        bool initialized = false;
+    } fair_tier;
+
+    /// Assigned once, under the leaf queue mutex, when this query's first request is accepted on
+    /// this leaf. Every later request of the query reuses it. `fcfs` orders by this value alone.
+    /// `fair-tier-5` and `fair-tier-10` order by it inside a tier. Unique among queries on the leaf.
+    UInt64 fcfs_sequence = 0;
+    bool fcfs_sequence_assigned = false;
+
+    /// `fcfs` only, mutated under the leaf queue mutex. `fcfs_inflight` is the number of quanta this
+    /// leaf has popped for the query and that `finish()` has not released. While it is non-zero, a
+    /// query with a larger `fcfs_sequence` is not admitted on this leaf.
+    UInt32 fcfs_inflight = 0;
 };
 
 /// Per-query scheduling context: the query-global config the schedulers read (weight, thresholds,
