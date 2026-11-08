@@ -174,9 +174,12 @@ TEST(RequestQueue, FcfsSameQuerySharesSequence)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
 }
 
+namespace
+{
 void setMaxCpuSlots(ResourceSchedulingContext * ctx, UInt64 slots)
 {
     ctx->resourceState(0)->max_cpu_slots.store(slots, std::memory_order_release);
+}
 }
 
 /// `if-fcfs`: a ceiling of 1 is served before a ceiling of 8 that was submitted earlier.
