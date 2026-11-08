@@ -40,7 +40,7 @@ enum class SchedulerAlgorithm
 {
     Fifo, /// First-come-first-served by request enqueue order
     Fcfs, /// Queries ordered by the sequence assigned when the query first submits a request
-    IfFcfs, /// `fcfs`, except a CPU slot ceiling of 1 or 2 is served strictly first
+    IfFcfs, /// `fcfs`, except a CPU slot ceiling of 1 through 4 is served strictly first
     Fair, /// Weighted fair queueing (SFQ) with per-query weight lowering
     Las, /// Least-Attained-Service, MLFQ-bucketed (favours short queries; can starve long ones)
     Gittins, /// Gittins index for the base distribution, bucketed into normalized powers-of-two levels
@@ -277,8 +277,8 @@ private:
 };
 
 /// `if-fcfs` — `fcfs` with a strict high-priority class for small CPU ceilings. A query whose
-/// published `max_cpu_slots` is 1 or 2 is served ahead of every other query. A ceiling of 0
-/// (unpublished) or above 2 stays in the normal class. Inside each class the order is
+/// published `max_cpu_slots` is 1, 2, 3, or 4 is served ahead of every other query. A ceiling of 0
+/// (unpublished) or above 4 stays in the normal class. Inside each class the order is
 /// `fcfs_sequence`, and a later sequence in that class stays queued while an earlier sequence of
 /// the same class holds a granted quantum. A privileged request is not held back by a
 /// non-privileged quantum. The normal class is not admitted while a privileged request is queued
@@ -287,7 +287,7 @@ private:
 class IfFcfsAlgorithm final : public ISchedulingAlgorithm
 {
 public:
-    static constexpr UInt64 max_privileged_slots = 2;
+    static constexpr UInt64 max_privileged_slots = 4;
 
     void push(ResourceRequest * request) override
     {
@@ -305,7 +305,7 @@ public:
             auto it = requests.begin();
             ResourceRequest * request = &*it;
             const double live_class = classOf(*request->scheduling.state);
-            // The ceiling grew past 2 while this request sat in the privileged class. Move it
+            // The ceiling grew past 4 while this request sat in the privileged class. Move it
             // behind queries that are still privileged and look at the new front.
             if (live_class > request->scheduling.key.first)
             {

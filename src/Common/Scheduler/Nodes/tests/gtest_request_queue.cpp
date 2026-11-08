@@ -197,7 +197,7 @@ TEST(RequestQueue, IfFcfsPrivilegedAheadOfWide)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1}));
 }
 
-/// A ceiling of 2 is still privileged. Two privileged queries stay in submission order, and the
+/// A ceiling of 4 is still privileged. Two privileged queries stay in submission order, and the
 /// earlier grant holds the later one.
 TEST(RequestQueue, IfFcfsPrivilegedOrderedBySequence)
 {
@@ -205,7 +205,7 @@ TEST(RequestQueue, IfFcfsPrivilegedOrderedBySequence)
     auto * first_query = f.makeQuery();
     auto * second_query = f.makeQuery();
     setMaxCpuSlots(first_query, 1);
-    setMaxCpuSlots(second_query, 2);
+    setMaxCpuSlots(second_query, 4);
     f.enqueue(1, first_query);
     f.enqueue(2, second_query);
     f.enqueue(3, first_query);
@@ -242,17 +242,17 @@ TEST(RequestQueue, IfFcfsUnpublishedDoesNotJump)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
 }
 
-/// Growing a queued query's ceiling past 2 demotes it behind a query that is still at 2.
+/// Growing a queued query's ceiling past 4 demotes it behind a query that is still at 4.
 TEST(RequestQueue, IfFcfsDemotesWhenCeilingGrows)
 {
     Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
     auto * grown = f.makeQuery();
     auto * still_small = f.makeQuery();
-    setMaxCpuSlots(grown, 2);
-    setMaxCpuSlots(still_small, 2);
+    setMaxCpuSlots(grown, 4);
+    setMaxCpuSlots(still_small, 4);
     f.enqueue(1, grown);
     f.enqueue(2, still_small);
-    setMaxCpuSlots(grown, 3);
+    setMaxCpuSlots(grown, 5);
 
     auto [first, active] = f.queue->dequeueRequest();
     (void)active;
