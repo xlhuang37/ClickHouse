@@ -18,7 +18,7 @@ void ResourceRequest::finish()
             constraint->finishRequest(this);
     }
 
-    // A granted `fcfs` quantum holds the leaf against later arrivals until it is finished.
+    // A granted `fcfs` or `if-fcfs` quantum holds the leaf against later arrivals until it is finished.
     if (ISchedulerNode * leaf = std::exchange(scheduling.fcfs_leaf, nullptr))
         static_cast<RequestQueue *>(leaf)->releaseFcfsInflight(*this);
 }

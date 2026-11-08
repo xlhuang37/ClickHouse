@@ -1,5 +1,6 @@
 #include <Common/Scheduler/CPULeaseAllocation.h>
 #include <Common/Scheduler/ISchedulerQueue.h>
+#include <Common/Scheduler/ResourceSchedulingContext.h>
 #include <Common/Scheduler/Debug.h>
 #include <Common/Exception.h>
 #include <Common/ProfileEvents.h>
@@ -162,9 +163,29 @@ void CPULeaseAllocation::RequestChain::granted()
         head = requests.begin();
 }
 
+void CPULeaseAllocation::RequestChain::publishMaxCpuSlots(SlotCount max_slots) const
+{
+    auto publish = [](const ResourceLink & link, SlotCount slots)
+    {
+        // Unclassified links share one fallback state. Writing it would make unrelated requests
+        // observe this query's ceiling.
+        if (link.scheduling_state == &default_scheduling_state)
+            return;
+        link.scheduling_state->max_cpu_slots.store(slots, std::memory_order_release);
+    };
+    publish(master_link, max_slots);
+    if (worker_link.scheduling_state != master_link.scheduling_state)
+        publish(worker_link, max_slots);
+}
+
 bool CPULeaseAllocation::RequestChain::enqueue(ResourceCost cost, ResourceCost requested_ns_)
 {
     chassert(!enqueued);
+
+    // Publish before the request becomes visible to the scheduler, including the noncompeting
+    // path below that never enters a queue. `setMax` publishes again when the ceiling changes
+    // without a new enqueue.
+    publishMaxCpuSlots(head->lease->current_max_slots);
 
     head->reset(cost);
     head->is_master_slot = std::exchange(request_master_slot, false);
@@ -592,6 +613,9 @@ void CPULeaseAllocation::setMax(SlotCount new_max)
 
     const bool growing = new_max > current_max_slots;
     current_max_slots = new_max;
+    // A request already queued must observe the new ceiling on its next pop, even when this
+    // change does not enqueue anything.
+    requests.publishMaxCpuSlots(current_max_slots);
 
     // Only growth needs an immediate kick: it may need to enqueue a new resource request
     // for the additional capacity. The grant chain (driven by grantImpl after each scheduler

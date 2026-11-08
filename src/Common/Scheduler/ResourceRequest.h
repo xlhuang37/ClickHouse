@@ -102,7 +102,8 @@ public:
         /// runtime (`fair`, `fair-max`), MLFQ level (`las`), attained-service tier (`fair-tier-5`,
         /// `fair-tier-10`), or remaining service (`srpt`); `.second` is a monotonic per-request
         /// sequence for a stable tie-break (`fair`, `las`, `srpt`, `gittins`, `priority`). `fcfs`
-        /// stores the query's `fcfs_sequence` here and orders by that alone. `fair-tier-5` and
+        /// stores the query's `fcfs_sequence` here and orders by that alone. `if-fcfs` stores the
+        /// priority class in `.first` and the same query sequence in `.second`. `fair-tier-5` and
         /// `fair-tier-10` store the same query sequence and order an equal tier by it alone.
         std::pair<double, UInt64> key{0.0, 0};
 
@@ -116,8 +117,9 @@ public:
         /// charged for service it never received, delaying its future requests. Zero otherwise.
         double vruntime_increment = 0.0;
 
-        /// `fcfs`: the leaf that popped this request, so `finish()` can drop the query's in-flight
-        /// count. Null unless this request is a granted `fcfs` quantum. Cleared by `finish()`/`reset()`.
+        /// `fcfs` and `if-fcfs`: the leaf that popped this request, so `finish()` can drop the query's
+        /// in-flight count. Null unless this request is a granted quantum of one of those schedulers.
+        /// Cleared by `finish()`/`reset()`.
         ISchedulerNode * fcfs_leaf = nullptr;
     } scheduling;
 
@@ -177,6 +179,7 @@ private:
     friend class ISchedulingAlgorithm; // moves requests between algorithms through `EnqueuedList`
     friend class FifoAlgorithm; // uses `enqueued_hook` for the `fifo` scheduler
     friend class FcfsAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fcfs` scheduler
+    friend class IfFcfsAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `if-fcfs` scheduler
     friend class FairAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `fair` scheduler
     friend class LasAlgorithm; // uses `scheduling_hook` + `scheduling.key` for the `las` scheduler
     friend class GittinsAlgorithm; // uses `scheduling_hook` + `scheduling.key`

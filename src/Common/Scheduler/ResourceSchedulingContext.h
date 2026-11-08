@@ -33,6 +33,13 @@ struct ResourceQueryState
     /// keyed. Kept in the scheduling state so the policy hot path does not need a query lookup.
     std::atomic<Int64> memory_usage{0};
 
+    /// CPU slot ceiling this query is allowed to hold (`CPULeaseAllocation::current_max_slots`).
+    /// Published by the allocation on enqueue and on `setMax`. `0` means the query has not published
+    /// a ceiling (IO requests, unclassified requests, and non-preemptive CPU slots). `if-fcfs` treats
+    /// 1 and 2 as the privileged class. Release/acquire: the pipeline thread stores it and the leaf
+    /// reads it without holding the allocation mutex.
+    std::atomic<UInt64> max_cpu_slots{0};
+
     /// `fair`-only state (leaf thread only), grouped so the other algorithms don't touch it: SFQ
     /// virtual runtime; a cached effective weight with a one-way latch (`effective_weight` is
     /// finalized on the first push when lowering is disabled, otherwise recomputed each push until a

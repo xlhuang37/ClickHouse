@@ -174,6 +174,145 @@ TEST(RequestQueue, FcfsSameQuerySharesSequence)
     EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
 }
 
+void setMaxCpuSlots(ResourceSchedulingContext * ctx, UInt64 slots)
+{
+    ctx->resourceState(0)->max_cpu_slots.store(slots, std::memory_order_release);
+}
+
+/// `if-fcfs`: a ceiling of 1 is served before a ceiling of 8 that was submitted earlier.
+TEST(RequestQueue, IfFcfsPrivilegedAheadOfWide)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * wide = f.makeQuery();
+    auto * small = f.makeQuery();
+    setMaxCpuSlots(wide, 8);
+    setMaxCpuSlots(small, 1);
+    f.enqueue(1, wide);
+    f.enqueue(2, small);
+
+    auto [first, active] = f.queue->dequeueRequest();
+    (void)active;
+    ASSERT_EQ(static_cast<TestRequest *>(first)->id, 2);
+    first->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1}));
+}
+
+/// A ceiling of 2 is still privileged. Two privileged queries stay in submission order, and the
+/// earlier grant holds the later one.
+TEST(RequestQueue, IfFcfsPrivilegedOrderedBySequence)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * first_query = f.makeQuery();
+    auto * second_query = f.makeQuery();
+    setMaxCpuSlots(first_query, 1);
+    setMaxCpuSlots(second_query, 2);
+    f.enqueue(1, first_query);
+    f.enqueue(2, second_query);
+    f.enqueue(3, first_query);
+
+    auto [first, active_after_first] = f.queue->dequeueRequest();
+    auto [second, active_after_second] = f.queue->dequeueRequest();
+    (void)active_after_first;
+    (void)active_after_second;
+    EXPECT_EQ(static_cast<TestRequest *>(first)->id, 1);
+    EXPECT_EQ(static_cast<TestRequest *>(second)->id, 3);
+    auto [blocked, active_while_held] = f.queue->dequeueRequest();
+    (void)active_while_held;
+    EXPECT_EQ(blocked, nullptr);
+
+    first->finish();
+    second->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
+}
+
+/// An unpublished ceiling (0) stays in the normal class, so it does not jump a wider query.
+TEST(RequestQueue, IfFcfsUnpublishedDoesNotJump)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * wide = f.makeQuery();
+    auto * unpublished = f.makeQuery();
+    setMaxCpuSlots(wide, 8);
+    f.enqueue(1, wide);
+    f.enqueue(2, unpublished);
+
+    auto [first, active] = f.queue->dequeueRequest();
+    (void)active;
+    ASSERT_EQ(static_cast<TestRequest *>(first)->id, 1);
+    first->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{2}));
+}
+
+/// Growing a queued query's ceiling past 2 demotes it behind a query that is still at 2.
+TEST(RequestQueue, IfFcfsDemotesWhenCeilingGrows)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * grown = f.makeQuery();
+    auto * still_small = f.makeQuery();
+    setMaxCpuSlots(grown, 2);
+    setMaxCpuSlots(still_small, 2);
+    f.enqueue(1, grown);
+    f.enqueue(2, still_small);
+    setMaxCpuSlots(grown, 3);
+
+    auto [first, active] = f.queue->dequeueRequest();
+    (void)active;
+    ASSERT_EQ(static_cast<TestRequest *>(first)->id, 2);
+    first->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{1}));
+}
+
+/// A granted quantum of a wide query does not block a privileged query that arrives later.
+TEST(RequestQueue, IfFcfsPrivilegedNotBlockedByWideInflight)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * wide = f.makeQuery();
+    auto * small = f.makeQuery();
+    setMaxCpuSlots(wide, 8);
+    setMaxCpuSlots(small, 2);
+    f.enqueue(1, wide);
+    auto [wide_grant, active_after_wide] = f.queue->dequeueRequest();
+    (void)active_after_wide;
+    ASSERT_EQ(static_cast<TestRequest *>(wide_grant)->id, 1);
+
+    f.enqueue(2, small);
+    auto [small_grant, active_after_small] = f.queue->dequeueRequest();
+    (void)active_after_small;
+    ASSERT_NE(small_grant, nullptr);
+    EXPECT_EQ(static_cast<TestRequest *>(small_grant)->id, 2);
+
+    wide_grant->finish();
+    small_grant->finish();
+}
+
+/// A privileged grant blocks a later privileged query and the normal class until it finishes.
+TEST(RequestQueue, IfFcfsPrivilegedInflightBlocksLaterArrivals)
+{
+    Fixture f(SchedulerAlgorithm::IfFcfs, CostUnit::CPUNanosecond);
+    auto * first_small = f.makeQuery();
+    auto * second_small = f.makeQuery();
+    auto * wide = f.makeQuery();
+    setMaxCpuSlots(first_small, 1);
+    setMaxCpuSlots(second_small, 2);
+    setMaxCpuSlots(wide, 8);
+    f.enqueue(1, first_small);
+    auto [grant, active_after_grant] = f.queue->dequeueRequest();
+    (void)active_after_grant;
+    ASSERT_EQ(static_cast<TestRequest *>(grant)->id, 1);
+
+    f.enqueue(2, second_small);
+    f.enqueue(3, wide);
+    auto [blocked, active_while_held] = f.queue->dequeueRequest();
+    (void)active_while_held;
+    EXPECT_EQ(blocked, nullptr);
+
+    grant->finish();
+    auto [next, active_after_finish] = f.queue->dequeueRequest();
+    (void)active_after_finish;
+    ASSERT_EQ(static_cast<TestRequest *>(next)->id, 2);
+    next->finish();
+    EXPECT_EQ(f.dequeueIds(), (std::vector<int>{3}));
+}
+
 /// fair, equal weights: two queries are interleaved fairly (SFQ round-robin).
 TEST(RequestQueue, FairEqualWeightInterleave)
 {
@@ -745,7 +884,7 @@ TEST(RequestQueue, SwapThroughAllSchedulersKeepsRequests)
     for (auto algo : {SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10,
                       SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins,
                       SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Srpt,
-                      SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
+                      SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::IfFcfs, SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fair})
         f.queue->setScheduler(algo);
     auto [len, cost] = f.queue->getQueueLengthAndCost();
     EXPECT_EQ(len, 4u);
@@ -810,7 +949,7 @@ TEST(RequestQueue, LasRekeySeesPendingCorrection)
 /// Cancellation from the middle works for both algorithms; counters update.
 TEST(RequestQueue, CancelFromMiddle)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::IfFcfs, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
                       SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
@@ -830,7 +969,7 @@ TEST(RequestQueue, CancelFromMiddle)
 /// max_waiting_queries is enforced on the total pending count for both algorithms.
 TEST(RequestQueue, MaxWaitingQueries)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::IfFcfs, SchedulerAlgorithm::Fair, SchedulerAlgorithm::FairMax,
                       SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10, SchedulerAlgorithm::Las,
                       SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins, SchedulerAlgorithm::Srpt})
     {
@@ -986,7 +1125,7 @@ TEST(RequestQueue, FairUsesSchedulingCostNotBudgetAdjustedCost)
 /// no longer depends on which algorithm is (or was) active.
 TEST(RequestQueue, AttainedChargedForEveryAlgorithm)
 {
-    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
+    for (auto algo : {SchedulerAlgorithm::Fifo, SchedulerAlgorithm::Fcfs, SchedulerAlgorithm::IfFcfs, SchedulerAlgorithm::Priority, SchedulerAlgorithm::Fair,
                       SchedulerAlgorithm::FairMax, SchedulerAlgorithm::FairTier5, SchedulerAlgorithm::FairTier10,
                       SchedulerAlgorithm::Las, SchedulerAlgorithm::Gittins, SchedulerAlgorithm::MemGittins,
                       SchedulerAlgorithm::Srpt})

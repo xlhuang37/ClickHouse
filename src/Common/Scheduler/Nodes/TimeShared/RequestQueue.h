@@ -40,6 +40,7 @@ enum class SchedulerAlgorithm
 {
     Fifo, /// First-come-first-served by request enqueue order
     Fcfs, /// Queries ordered by the sequence assigned when the query first submits a request
+    IfFcfs, /// `fcfs`, except a CPU slot ceiling of 1 or 2 is served strictly first
     Fair, /// Weighted fair queueing (SFQ) with per-query weight lowering
     Las, /// Least-Attained-Service, MLFQ-bucketed (favours short queries; can starve long ones)
     Gittins, /// Gittins index for the base distribution, bucketed into normalized powers-of-two levels
@@ -59,6 +60,8 @@ inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
         return SchedulerAlgorithm::Fifo;
     if (name == "fcfs")
         return SchedulerAlgorithm::Fcfs;
+    if (name == "if-fcfs")
+        return SchedulerAlgorithm::IfFcfs;
     if (name == "fair")
         return SchedulerAlgorithm::Fair;
     if (name == "las")
@@ -83,7 +86,7 @@ inline SchedulerAlgorithm parseSchedulerAlgorithm(const String & name)
         return SchedulerAlgorithm::FairTier10;
     throw Exception(
         ErrorCodes::BAD_ARGUMENTS,
-        "Unknown workload scheduler '{}' (expected 'fifo', 'fcfs', 'fair', 'las', 'gittins', 'mem-gittins', "
+        "Unknown workload scheduler '{}' (expected 'fifo', 'fcfs', 'if-fcfs', 'fair', 'las', 'gittins', 'mem-gittins', "
         "'gittins-raw', 'mem-gittins-raw', 'priority', 'srpt', 'fair-max', 'fair-tier-5' or 'fair-tier-10')",
         name);
 }
@@ -267,6 +270,158 @@ private:
         }
     };
     using Set = boost::intrusive::multiset<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByQuerySequence>>;
+
+    Set requests;
+    /// Queries with a non-zero `fcfs_inflight` on this leaf. Entries are removed when the count hits zero.
+    std::vector<ResourceQueryState *> inflight_states;
+};
+
+/// `if-fcfs` — `fcfs` with a strict high-priority class for small CPU ceilings. A query whose
+/// published `max_cpu_slots` is 1 or 2 is served ahead of every other query. A ceiling of 0
+/// (unpublished) or above 2 stays in the normal class. Inside each class the order is
+/// `fcfs_sequence`, and a later sequence in that class stays queued while an earlier sequence of
+/// the same class holds a granted quantum. A privileged request is not held back by a
+/// non-privileged quantum. The normal class is not admitted while a privileged request is queued
+/// or a privileged quantum is still in flight. The pipeline ceiling only grows, so a queued
+/// request can leave the privileged class; `pop` re-keys the front request when that happens.
+class IfFcfsAlgorithm final : public ISchedulingAlgorithm
+{
+public:
+    static constexpr UInt64 max_privileged_slots = 2;
+
+    void push(ResourceRequest * request) override
+    {
+        chassert(request->scheduling.state->fcfs_sequence_assigned);
+        auto & state = *request->scheduling.state;
+        // Class, then the query sequence. Requests of one query in one class compare equal.
+        request->scheduling.key = {classOf(state), state.fcfs_sequence};
+        requests.insert(*request);
+    }
+
+    ResourceRequest * pop() override
+    {
+        while (!requests.empty())
+        {
+            auto it = requests.begin();
+            ResourceRequest * request = &*it;
+            const double live_class = classOf(*request->scheduling.state);
+            // The ceiling grew past 2 while this request sat in the privileged class. Move it
+            // behind queries that are still privileged and look at the new front.
+            if (live_class > request->scheduling.key.first)
+            {
+                requests.erase(it);
+                request->scheduling.key.first = live_class;
+                requests.insert(*request);
+                continue;
+            }
+            if (isBlocked(*request))
+                return nullptr;
+            requests.erase(it);
+            noteGranted(*request);
+            return request;
+        }
+        return nullptr;
+    }
+
+    /// `finish()` of a granted quantum. Returns true when this was the query's last in-flight quantum.
+    bool releaseInflight(ResourceQueryState * state)
+    {
+        chassert(state->fcfs_inflight > 0);
+        if (--state->fcfs_inflight > 0)
+            return false;
+        std::erase(inflight_states, state);
+        return true;
+    }
+
+    bool erase(ResourceRequest * request) override
+    {
+        if (!request->scheduling_hook.is_linked())
+            return false;
+        requests.erase(requests.iterator_to(*request));
+        return true;
+    }
+
+    ResourceRequest * popWorst() override
+    {
+        if (requests.empty())
+            return nullptr;
+        auto it = std::prev(requests.end());
+        ResourceRequest * request = &*it;
+        requests.erase(it);
+        return request;
+    }
+
+    void pullAll(ResourceRequest::EnqueuedList & out) noexcept override
+    {
+        while (!requests.empty())
+        {
+            ResourceRequest & request = *requests.begin();
+            requests.erase(requests.begin());
+            out.push_back(request);
+        }
+    }
+
+    void reset() noexcept override
+    {
+        chassert(requests.empty());
+    }
+
+    bool empty() const override { return requests.empty(); }
+
+private:
+    static bool isPrivileged(const ResourceQueryState & state) noexcept
+    {
+        const UInt64 slots = state.max_cpu_slots.load(std::memory_order_acquire);
+        return slots >= 1 && slots <= max_privileged_slots;
+    }
+
+    static double classOf(const ResourceQueryState & state) noexcept
+    {
+        return isPrivileged(state) ? 0.0 : 1.0;
+    }
+
+    /// A privileged front request waits only for an earlier privileged quantum. A normal front
+    /// request also waits for every privileged quantum still in flight, and for an earlier normal one.
+    bool isBlocked(const ResourceRequest & request) const
+    {
+        const ResourceQueryState & state = *request.scheduling.state;
+        const bool privileged = isPrivileged(state);
+        const UInt64 sequence = state.fcfs_sequence;
+        for (const ResourceQueryState * inflight : inflight_states)
+        {
+            if (inflight->fcfs_inflight == 0)
+                continue;
+            const bool inflight_privileged = isPrivileged(*inflight);
+            if (privileged)
+            {
+                if (inflight_privileged && inflight->fcfs_sequence < sequence)
+                    return true;
+            }
+            else if (inflight_privileged || inflight->fcfs_sequence < sequence)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void noteGranted(ResourceRequest & request)
+    {
+        auto * state = request.scheduling.state;
+        if (state->fcfs_inflight == 0)
+            inflight_states.push_back(state);
+        ++state->fcfs_inflight;
+    }
+
+    /// Class, then the query's `fcfs_sequence`. Equal keys stay in enqueue order via the multiset.
+    struct ByClassAndQuerySequence
+    {
+        bool operator()(const ResourceRequest & lhs, const ResourceRequest & rhs) const noexcept
+        {
+            return lhs.scheduling.key < rhs.scheduling.key;
+        }
+    };
+    using Set = boost::intrusive::multiset<ResourceRequest, ResourceRequest::SchedulingHook, boost::intrusive::compare<ByClassAndQuerySequence>>;
 
     Set requests;
     /// Queries with a non-zero `fcfs_inflight` on this leaf. Entries are removed when the count hits zero.
@@ -1237,10 +1392,11 @@ public:
         bool was_empty = total_requests == 0;
         total_requests++;
         SCHED_DBG("{} -- enqueue(cost={}, queued={})", basename, request->cost, total_requests);
-        // `fcfs` may have refused to dequeue while an earlier query held a quantum, which deactivates
-        // the leaf with requests still queued. A new request (the earlier query renewing, or the first
-        // request after it finished) has to wake the leaf again; `was_empty` is false in that case.
-        if (was_empty || algorithm == SchedulerAlgorithm::Fcfs)
+        // `fcfs` and `if-fcfs` may have refused to dequeue while an earlier query held a quantum,
+        // which deactivates the leaf with requests still queued. A new request (the earlier query
+        // renewing, or the first request after it finished) has to wake the leaf again; `was_empty`
+        // is false in that case.
+        if (was_empty || algorithm == SchedulerAlgorithm::Fcfs || algorithm == SchedulerAlgorithm::IfFcfs)
             scheduleActivation();
     }
 
@@ -1248,7 +1404,10 @@ public:
     void releaseFcfsInflight(ResourceRequest & request)
     {
         std::lock_guard lock(mutex);
-        if (fcfs_algorithm.releaseInflight(request.scheduling.state) && !fcfs_algorithm.empty())
+        const bool last_inflight = algorithm == SchedulerAlgorithm::IfFcfs
+            ? if_fcfs_algorithm.releaseInflight(request.scheduling.state)
+            : fcfs_algorithm.releaseInflight(request.scheduling.state);
+        if (last_inflight && !algo->empty())
             scheduleActivation();
     }
 
@@ -1258,13 +1417,13 @@ public:
         ResourceRequest * request = algo->pop();
         if (!request)
         {
-            // `fcfs` returns null while a later query is queued behind an earlier in-flight query.
-            // Leave those requests queued and report inactive so the scheduler waits to be woken.
+            // `fcfs` and `if-fcfs` return null while a later query is queued behind an earlier
+            // in-flight query. Leave those requests queued and report inactive so the scheduler waits.
             if (algo->empty())
                 flushThroughputOnDeactivation();
             return {nullptr, false};
         }
-        if (algorithm == SchedulerAlgorithm::Fcfs)
+        if (algorithm == SchedulerAlgorithm::Fcfs || algorithm == SchedulerAlgorithm::IfFcfs)
             request->scheduling.fcfs_leaf = this;
         // Charge attained service unconditionally: every request carries a valid per-query state,
         // stamped from its classifier link at enqueue. The declared cost is the estimate now that the
@@ -1443,6 +1602,7 @@ private:
         {
             case SchedulerAlgorithm::Fifo: return fifo_algorithm;
             case SchedulerAlgorithm::Fcfs: return fcfs_algorithm;
+            case SchedulerAlgorithm::IfFcfs: return if_fcfs_algorithm;
             case SchedulerAlgorithm::Fair: return fair_algorithm;
             case SchedulerAlgorithm::Las: return las_algorithm;
             case SchedulerAlgorithm::Gittins: return gittins_algorithm;
@@ -1498,6 +1658,7 @@ private:
     /// One instance of each algorithm, so switching never allocates; `algo` points at the active one.
     FifoAlgorithm fifo_algorithm;
     FcfsAlgorithm fcfs_algorithm;
+    IfFcfsAlgorithm if_fcfs_algorithm;
     FairAlgorithm fair_algorithm;
     LasAlgorithm las_algorithm;
     GittinsAlgorithm gittins_algorithm;
